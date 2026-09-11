@@ -134,14 +134,34 @@ function buildSvg(data, width = 900, height = 460) {
     height - (offY + (p.lat - minLat) * scale),
   ];
 
-  // 渐变路径：按速度着色
-  const segs = [];
+  // 渐变路径：按速度着色。
+  // 切段规则：换会话(no) / 空间跳变>250m / 时间断档>15min —— 多设备合并的数据里杜绝飞线
+  const distM = (a, b) => {
+    const toRad = (x) => (x * Math.PI) / 180;
+    const dLat = toRad(b.lat - a.lat), dLng = toRad(b.lng - a.lng);
+    const h = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLng / 2) ** 2;
+    return 2 * 6371000 * Math.asin(Math.min(1, Math.sqrt(h)));
+  };
+  const chunks = [];
+  let cur = [pts[0]];
   for (let i = 1; i < pts.length; i++) {
-    const [x1, y1] = proj(pts[i - 1]);
-    const [x2, y2] = proj(pts[i]);
-    const spd = pts[i].spd || 0;
-    const color = speedGradientColor(spd);
-    segs.push(`<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" stroke="${color}" stroke-width="2.4" stroke-linecap="round" opacity="0.92"/>`);
+    const a = pts[i - 1], b = pts[i];
+    const noA = Number(a.no) || 0, noB = Number(b.no) || 0;
+    if (distM(a, b) > 250 || ((b.t || 0) - (a.t || 0)) > 15 * 60000 || (noA && noB && noA !== noB)) {
+      chunks.push(cur); cur = [b];
+    } else cur.push(b);
+  }
+  chunks.push(cur);
+
+  const segs = [];
+  for (const chunk of chunks) {
+    for (let i = 1; i < chunk.length; i++) {
+      const [x1, y1] = proj(chunk[i - 1]);
+      const [x2, y2] = proj(chunk[i]);
+      const spd = chunk[i].spd || 0;
+      const color = speedGradientColor(spd);
+      segs.push(`<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" stroke="${color}" stroke-width="2.4" stroke-linecap="round" opacity="0.92"/>`);
+    }
   }
   const [sx, sy] = proj(pts[0]);
   const [ex, ey] = proj(pts[pts.length - 1]);

@@ -87,6 +87,7 @@
       this.roadPct = 0;
       this.roadRemain = 0;
       this.roadDone = 0;        // 已在当前这条路走了多少米（0.9.8 起 HUD 显示米数而不是百分比）
+      this.sessionNo = 0;       // 本次出发的全局序号：轨迹点带上它，绘制时按会话切分（多设备不连飞线）
       this.roadLen = 0;
       this.totals = { rx: 0, tx: 0, keys: 0 };
 
@@ -212,6 +213,7 @@
           this._pending.push({
             t: Date.now(), lat: this.pos.lat, lng: this.pos.lng,
             road: this.road, spd: this.speedKmh, mode: this.mode,
+            no: this.sessionNo || 0,   // 会话号：多设备合并后绘制按它切分，杜绝跨设备飞线
           });
           this._lastPoint = Object.assign({}, this.pos);
           this.provider.addTrackPoint(this.pos.lat, this.pos.lng, this._lastPoint, this.speedKmh);

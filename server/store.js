@@ -118,6 +118,7 @@ class TrackStore {
         road: p.road || '',
         spd: Number((p.spd || 0).toFixed(2)),
         mode: p.mode || 'walk',
+        no: Number(p.no) || 0,   // 会话号：绘制时按它切分，多设备合并后不连飞线
       });
     }
     this.markDirty(date);

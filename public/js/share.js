@@ -142,14 +142,33 @@
       ctx.lineCap = 'round';
       ctx.lineJoin = 'round';
       ctx.lineWidth = 3.2;
+      // 切段：换会话(no) / 跳变>250m / 断档>15min —— 分享图里不出现跨设备飞线
+      const distM = (a, b) => {
+        const toRad = (x) => (x * Math.PI) / 180;
+        const dLat = toRad(b.lat - a.lat), dLng = toRad(b.lng - a.lng);
+        const h = Math.sin(dLat / 2) ** 2 + Math.cos(toRad(a.lat)) * Math.cos(toRad(b.lat)) * Math.sin(dLng / 2) ** 2;
+        return 2 * 6371000 * Math.asin(Math.min(1, Math.sqrt(h)));
+      };
+      const chunks = [];
+      let cur = [track[0]];
       for (let i = 1; i < track.length; i++) {
-        const a = proj(track[i - 1]);
-        const b = proj(track[i]);
-        ctx.strokeStyle = speedColor(track[i].spd || 0);
-        ctx.beginPath();
-        ctx.moveTo(a[0], a[1]);
-        ctx.lineTo(b[0], b[1]);
-        ctx.stroke();
+        const a = track[i - 1], b = track[i];
+        const noA = Number(a.no) || 0, noB = Number(b.no) || 0;
+        if (distM(a, b) > 250 || ((b.t || 0) - (a.t || 0)) > 15 * 60000 || (noA && noB && noA !== noB)) {
+          chunks.push(cur); cur = [b];
+        } else cur.push(b);
+      }
+      chunks.push(cur);
+      for (const chunk of chunks) {
+        for (let i = 1; i < chunk.length; i++) {
+          const a = proj(chunk[i - 1]);
+          const b = proj(chunk[i]);
+          ctx.strokeStyle = speedColor(chunk[i].spd || 0);
+          ctx.beginPath();
+          ctx.moveTo(a[0], a[1]);
+          ctx.lineTo(b[0], b[1]);
+          ctx.stroke();
+        }
       }
       // 起终点
       const s = proj(track[0]);

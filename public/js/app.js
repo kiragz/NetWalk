@@ -835,13 +835,6 @@
       onRoll: onEngineRoll,
       onLog: log,
     });
-    state.engine = engine;
-    engine.start();
-    state.started = true;
-    el.btnStart.disabled = true;
-    el.btnPause.disabled = false;
-    el.btnEnd.disabled = false;
-    el.btnPause.textContent = '暂停';
 
     if (resume) {
       const when = resume.date === today() ? '上次结束位置' : `${resume.date} 的结束位置`;
@@ -849,17 +842,62 @@
     } else {
       log('从出发点出发');
     }
+    // 先拿本次出发的全局序号（轨迹点要带上它，绘制时按会话切分、杜绝跨设备飞线），再启动引擎
+    let sessionNo = 0;
+    try {
+      const sj = await fetch('/api/session/start', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date: today(), city: state.cfg.city, scope: state.cfg.scope, lat: origin.lat, lng: origin.lng }),
+      }).then((r) => r.json());
+      if (sj && sj.sessionNo) sessionNo = sj.sessionNo;
+    } catch (_) { /* 离线时忽略 */ }
+    if (sessionNo && state.provider && state.provider.addStartMarker) {
+      state.provider.addStartMarker(origin.lat, origin.lng, sessionNo);
+      log(`第 ${sessionNo} 次出发（地图上已用紫点标出）`);
+    }
     // 主地图先画上历史轨迹（走过的所有路，按速度渐变色），再画全部出发点（紫点 + 序号）
     drawHistoryOnMap(origin);
-    fetch('/api/session/start', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ date: today(), city: state.cfg.city, scope: state.cfg.scope, lat: origin.lat, lng: origin.lng }),
-    }).then((r) => r.json()).then((j) => {
-      if (state.provider && state.provider.addStartMarker && j.sessionNo) {
-        state.provider.addStartMarker(origin.lat, origin.lng, j.sessionNo);
-        log(`第 ${j.sessionNo} 次出发（地图上已用紫点标出）`);
+    state.engine = engine;
+    engine.sessionNo = sessionNo;
+    engine.start();
+    state.started = true;
+    el.btnStart.disabled = true;
+    el.btnPause.disabled = false;
+    el.btnEnd.disabled = false;
+    el.btnPause.textContent = '暂停';
+  }
+
+  /**
+   * 把轨迹点切成"连续段"（杜绝飞线的统一规则，命中任一即断开）：
+   * ① 跨会话：点的会话号不同，或跨过某次「出发」的时间点
+   * ② 空间断：相邻点跳变 >250m（瞬移 / 直线兜底留下的跨块直线）
+   * ③ 时间断档：>15 分钟（中间没走，连起来也是假线）
+   */
+  function splitTrackSegments(points, starts) {
+    const st = (starts || []).map((x) => Number(x.t !== undefined ? x.t : x)).filter(Boolean).sort((a, b) => a - b);
+    const segs = [];
+    let cur = [];
+    let si = 0;
+    for (const p of points) {
+      while (si < st.length && st[si] <= (p.t || 0)) {
+        si++;
+        if (cur.length > 1) segs.push(cur);
+        cur = [];
       }
-    }).catch(() => { /* 离线时忽略 */ });
+      if (cur.length) {
+        const prev = cur[cur.length - 1];
+        const noA = Number(prev.no) || 0, noB = Number(p.no) || 0;
+        const m = haversineKm(prev, p);
+        const dt = (p.t || 0) - (prev.t || 0);
+        if (m > 250 || dt > 15 * 60000 || (noA && noB && noA !== noB)) {
+          if (cur.length > 1) segs.push(cur);
+          cur = [];
+        }
+      }
+      cur.push(p);
+    }
+    if (cur.length > 1) segs.push(cur);
+    return segs;
   }
 
   /** 把历史上所有走过的轨迹画到主地图（按速度渐变分色），出发时调用 */
@@ -871,39 +909,11 @@
       const flat = days.flatMap((d) => d.path || []);
       if (flat.length < 2) { log('地图上还没有历史轨迹，本次行走将开始画线'); }
       else {
-        // 分段规则（三类，命中任一即断开）：
-        // ① 跨会话：每个「出发」之后必然是新的一段 —— 两台设备交替走时，
-        //    同一天的合并数据按时间排序会在两台设备的位置之间来回跳，
-        //    不按会话切开就会画出横穿街区的"直线飞线"
-        // ② 空间断：相邻点跳变 >250m（瞬移 / 直线兜底留下的跨块直线）
-        // ③ 时间断档：>15 分钟（中间没走，连起来也是假线）
-        const starts = ((r && r.starts) || []).map((s) => Number(s.t)).filter(Boolean).sort((a, b) => a - b);
-        const segs = [];
-        let cur = [];
-        let si = 0;
-        for (const p of flat) {
-          while (si < starts.length && starts[si] <= (p.t || 0)) {
-            si++;
-            if (cur.length > 1) segs.push(cur);
-            cur = [];
-          }
-          if (cur.length) {
-            const prev = cur[cur.length - 1];
-            const m = haversineKm(prev, p);
-            const dt = (p.t || 0) - (prev.t || 0);
-            if (m > 250 || dt > 15 * 60000) {
-              if (cur.length > 1) segs.push(cur);
-              cur = [];
-            }
-          }
-          cur.push(p);
-        }
-        if (cur.length > 1) segs.push(cur);
+        const segs = splitTrackSegments(flat, (r && r.starts) || []);
         segs.forEach((seg, idx) => {
-          if (seg.length < 2) return;
           state.provider.setTrack(seg, { append: idx > 0 });
         });
-        log(`已把历史轨迹画上地图：${days.length} 天、${flat.length} 个点、${segs.length} 段连续轨迹`);
+        log(`已把历史轨迹画上地图：${days.length} 天、${flat.length} 个点、${segs.length} 段连续轨迹（已剔除跨设备/跨会话飞线）`);
       }
       for (const st of (r && r.starts) || []) {
         if (state.provider.addStartMarker) state.provider.addStartMarker(st.lat, st.lng, st.n);
@@ -1385,12 +1395,15 @@
       H - (offY + (p.lat - minLat) * scale),
     ];
     const segs = [];
-    for (let i = 1; i < track.length; i++) {
-      const [x1, y1] = proj(track[i - 1]);
-      const [x2, y2] = proj(track[i]);
-      const spd = track[i].spd || 0;
-      const color = speedGradientColor(spd);
-      segs.push(`<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" stroke="${color}" stroke-width="2.4" stroke-linecap="round" opacity="0.92"/>`);
+    // 按会话/跳变/断档切段后再画 —— 多设备合并的数据里不出现跨设备飞线
+    for (const seg of splitTrackSegments(track, starts)) {
+      for (let i = 1; i < seg.length; i++) {
+        const [x1, y1] = proj(seg[i - 1]);
+        const [x2, y2] = proj(seg[i]);
+        const spd = seg[i].spd || 0;
+        const color = speedGradientColor(spd);
+        segs.push(`<line x1="${x1.toFixed(1)}" y1="${y1.toFixed(1)}" x2="${x2.toFixed(1)}" y2="${y2.toFixed(1)}" stroke="${color}" stroke-width="2.4" stroke-linecap="round" opacity="0.92"/>`);
+      }
     }
     let startsSvg = '';
     for (const st of (starts || [])) {
