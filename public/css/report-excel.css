@@ -1,0 +1,65 @@
+/* 纯文字 Excel 风格 —— 摸鱼外观专用 */
+* { box-sizing: border-box; }
+html, body { margin: 0; padding: 0; }
+body {
+  font-family: 'Calibri', 'Segoe UI', 'Microsoft YaHei', sans-serif;
+  font-size: 11pt;
+  color: #000;
+  background: #f3f2f1;
+  user-select: none;
+  -webkit-user-select: none;
+}
+.titlebar { background: #217346; color: #fff; height: 30px; display: flex; align-items: center; padding: 0 10px; font-size: 11px; gap: 14px; }
+.titlebar .tb-name { font-weight: 600; }
+.titlebar .tb-spacer { flex: 1; }
+.titlebar .tb-ctrls { display: flex; gap: 14px; font-size: 13px; opacity: 0.95; }
+.ribbon { background: #f3f2f1; border-bottom: 1px solid #d4d4d4; padding: 6px 10px; display: flex; gap: 4px; align-items: center; font-size: 11px; color: #444; }
+.ribbon .rb-tab { padding: 4px 10px; cursor: default; border-radius: 2px; }
+.ribbon .rb-tab.on { background: #fff; border: 1px solid #c8c8c8; border-bottom-color: #fff; font-weight: 600; color: #217346; }
+.ribbon .rb-tools { display: flex; gap: 4px; margin-left: 18px; }
+.ribbon .rb-btn { background: #fff; border: 1px solid #d4d4d4; padding: 4px 10px; border-radius: 2px; cursor: pointer; font-size: 11px; color: #333; }
+.ribbon .rb-btn:hover { background: #e8e8e8; }
+.ribbon .rb-spacer { flex: 1; }
+.ribbon .rb-hint { color: #666; font-size: 10px; }
+.formula-bar { background: #fff; border-bottom: 1px solid #d4d4d4; display: flex; align-items: center; padding: 0; height: 24px; }
+.formula-bar .fb-name { width: 110px; padding: 0 8px; border-right: 1px solid #d4d4d4; font-size: 11px; color: #444; }
+.formula-bar .fb-fx { padding: 0 8px; border-right: 1px solid #d4d4d4; font-style: italic; color: #666; font-size: 12px; }
+.formula-bar .fb-input { flex: 1; padding: 0 8px; font-size: 11px; border: none; outline: none; color: #000; background: transparent; }
+.sheet-wrap { display: inline-block; background: #fff; border-top: 1px solid #d4d4d4; border-left: 1px solid #d4d4d4; }
+.col-headers { display: flex; }
+.col-headers .col-h { width: 110px; height: 20px; line-height: 20px; text-align: center; background: #f3f2f1; border-right: 1px solid #d4d4d4; font-size: 11px; color: #444; }
+.col-headers .col-h.selected { background: #d6eaf3; color: #1a5b87; font-weight: 600; }
+.sheet-body { display: flex; }
+.row-headers { display: flex; flex-direction: column; }
+.row-headers .row-h { width: 40px; height: 22px; line-height: 22px; text-align: center; background: #f3f2f1; border-right: 1px solid #d4d4d4; border-bottom: 1px solid #d4d4d4; font-size: 11px; color: #444; }
+.row-headers .row-h.selected { background: #d6eaf3; color: #1a5b87; font-weight: 600; }
+.sheet { display: flex; flex-direction: column; background: #fff; font-size: 11pt; }
+.sheet .row { display: flex; }
+.sheet .cell { width: 110px; box-sizing: border-box; border-right: 1px solid #d4d4d4; border-bottom: 1px solid #d4d4d4; padding: 3px 6px; height: 22px; line-height: 16px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; cursor: cell; }
+.sheet .cell.head { background: #f3f2f1; font-weight: 600; border-bottom: 1px solid #b4b4b4; }
+.sheet .cell.num { text-align: right; }
+.sheet .cell.total { background: #fff2cc; font-weight: 700; border-top: 1px solid #888; }
+.sheet .cell.subtotal { background: #e2efda; font-weight: 600; }
+.sheet .cell.archive { color: #555; font-family: Consolas, 'Courier New', monospace; font-size: 9pt; }
+.sheet .cell.selected { outline: 2px solid #217346; outline-offset: -2px; }
+.corner { width: 40px; height: 20px; background: #f3f2f1; border-right: 1px solid #d4d4d4; border-bottom: 1px solid transparent; display: inline-block; }
+.statusbar { background: #217346; color: #fff; height: 22px; display: flex; align-items: center; font-size: 10px; padding: 0 6px; gap: 14px; }
+.statusbar .sb-seg { padding: 0 8px; opacity: 0.95; }
+.statusbar .sb-spacer { flex: 1; }
+.statusbar .sb-btn { padding: 0 8px; opacity: 0.95; cursor: pointer; }
+.savebar { background: #fff; border-top: 1px solid #d4d4d4; padding: 8px 12px; font-size: 11px; color: #333; display: flex; align-items: center; gap: 10px; }
+.savebar .sb-tip { color: #666; }
+.savebar .sb-acts { display: flex; gap: 6px; margin-left: auto; align-items: center; }
+.savebar .sb-acts button { background: #fff; border: 1px solid #c8c8c8; padding: 5px 12px; border-radius: 2px; font-size: 11px; cursor: pointer; color: #333; }
+.savebar .sb-acts button:hover { background: #e8e8e8; }
+.savebar .sb-acts .primary { background: #217346; color: #fff; border-color: #217346; }
+.savebar .sb-acts .primary:hover { background: #1d6540; }
+.savebar .sb-acts .ok { color: #217346; font-weight: 600; font-size: 11px; padding: 5px 8px; }
+
+/* 日期选择器 */
+.ribbon .rb-sel {
+  background: #fff; border: 1px solid #d4d4d4; padding: 3px 6px; border-radius: 2px;
+  font-size: 11px; color: #333; cursor: pointer; font-family: inherit; min-width: 104px;
+}
+.ribbon .rb-sel:hover { background: #e8e8e8; }
+.ribbon .rb-sel:focus { outline: 1px solid #217346; }

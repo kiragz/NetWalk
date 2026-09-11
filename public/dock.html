@@ -1,0 +1,127 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+<meta charset="utf-8"/>
+<meta name="viewport" content="width=device-width, initial-scale=1"/>
+<title>NetWalk DOCK</title>
+<link rel="stylesheet" href="/css/style.css"/>
+<style>
+  body { background: transparent; overflow: hidden; }
+  .dock-standalone {
+    position: fixed; inset: 0; margin: 0;
+    background: var(--panel-solid);
+    border: 1px solid var(--line);
+    border-radius: 16px; padding: 14px 16px 12px;
+    display: flex; flex-direction: column;
+  }
+  .dock-standalone .metric-grid { margin-bottom: 10px; }
+  .dock-standalone .speed-block { margin-bottom: 10px; }
+  .dock-standalone .info-list { margin-bottom: 10px; gap: 6px; }
+  .dock-standalone .roll-line { margin-bottom: 10px; }
+  .dock-standalone h3 { letter-spacing: 2px; }
+  .drag-hint { font-size: 10px; color: #55627a; margin-top: auto; text-align: center; padding-top: 6px; }
+</style>
+</head>
+<body>
+<div class="dock dock-standalone">
+  <div class="dock-head">
+    <h3>NETWALK DOCK</h3>
+    <div class="acts"><span class="pill" id="pillLink" style="font-size:10px;padding:2px 8px">等待主窗口</span></div>
+  </div>
+
+  <div class="metric-grid">
+    <div class="metric down"><div class="lb">↓ 下载</div><div class="vl" id="mDown">0<small>B/s</small></div></div>
+    <div class="metric up"><div class="lb">↑ 上传</div><div class="vl" id="mUp">0<small>B/s</small></div></div>
+  </div>
+  <div class="metric kpm" style="margin-bottom:10px"><div class="lb">⌨ 打字速度</div><div class="vl" id="mKpm">0<small>KPM</small></div></div>
+
+  <div class="speed-block">
+    <div class="speed-row">
+      <div class="speed-big" id="mSpeed">0.0<small>km/h</small></div>
+      <div class="mode-tag" id="mMode" style="color:#8b98b5">🧍 待命</div>
+    </div>
+    <div class="bar"><i id="mBar"></i></div>
+    <div class="bar-lb"><span>活动强度</span><span id="mIntensity">0%</span></div>
+  </div>
+
+  <div class="info-list">
+    <div class="info-row"><span class="k">位置</span><span class="v road" id="mRoad">—</span></div>
+    <div class="info-row"><span class="k">里程</span><span class="v" id="mDist">0.00 km</span></div>
+    <div class="info-row"><span class="k">时长</span><span class="v" id="mDur">00:00:00</span></div>
+    <div class="info-row"><span class="k">路口</span><span class="v" id="mRolls">0 次</span></div>
+  </div>
+
+  <div class="roll-line" id="mRoll"><span class="dice">🎲</span><span id="mRollTxt">等待出发</span></div>
+  <div class="drag-hint">保持 NetWalk 主窗口开启 · 数据实时同步</div>
+</div>
+
+<script src="/js/speed.js"></script>
+<script>
+(function () {
+  'use strict';
+  const $ = (id) => document.getElementById(id);
+  const MODES = window.NetWalkSpeed.MODES;
+  let runMax = 16;
+
+  function fmtBps(b) {
+    const v = Math.max(0, Number(b) || 0);
+    const u = ['B/s', 'KB/s', 'MB/s', 'GB/s'];
+    let i = 0; let n = v;
+    while (n >= 1024 && i < u.length - 1) { n /= 1024; i++; }
+    return `${(n >= 100 || i === 0 ? n.toFixed(0) : n.toFixed(1))}<small>${u[i]}</small>`;
+  }
+  function fmtDur(ms) {
+    const s = Math.max(0, Math.round(ms / 1000));
+    return [String(Math.floor(s / 3600)).padStart(2, '0'),
+      String(Math.floor((s % 3600) / 60)).padStart(2, '0'),
+      String(s % 60).padStart(2, '0')].join(':');
+  }
+
+  function renderNet(net) {
+    $('mDown').innerHTML = fmtBps(net.rx);
+    $('mUp').innerHTML = fmtBps(net.tx);
+  }
+  function renderKey(key) {
+    $('mKpm').innerHTML = `${key.kpm}<small>KPM</small>`;
+  }
+  function renderState(s) {
+    const m = MODES[s.mode] || MODES.walk;
+    $('mSpeed').innerHTML = `${(s.speedKmh || 0).toFixed(1)}<small>km/h</small>`;
+    $('mMode').textContent = `${m.icon} ${m.label}`;
+    $('mMode').style.color = m.color;
+    const pct = Math.round(Math.min(100, ((s.speedKmh || 0) / (runMax * 1.35)) * 100));
+    $('mBar').style.width = pct + '%';
+    $('mIntensity').textContent = pct + '%';
+    $('mRoad').textContent = s.road || '—';
+    $('mDist').textContent = ((s.distance || 0) / 1000).toFixed(2) + ' km';
+    $('mDur').textContent = fmtDur(s.durationMs || 0);
+    $('mRolls').textContent = (s.rolls || 0) + ' 次';
+  }
+
+  fetch('/api/config').then((r) => r.json()).then((c) => {
+    runMax = (c.speed && c.speed.runMax) || 16;
+  }).catch(() => {});
+
+  if ('BroadcastChannel' in window) {
+    const ch = new BroadcastChannel('netwalk');
+    ch.onmessage = (ev) => {
+      const d = ev.data || {};
+      $('pillLink').textContent = '已连接';
+      $('pillLink').className = 'pill on';
+      if (d.type === 'tick') { renderNet(d.net); renderKey(d.key); }
+      if (d.type === 'state') renderState(d);
+    };
+  } else {
+    setInterval(async () => {
+      try {
+        const r = await fetch('/api/status');
+        const j = await r.json();
+        renderNet(j.net);
+        renderKey(j.key);
+      } catch (_) { /* noop */ }
+    }, 1000);
+  }
+})();
+</script>
+</body>
+</html>

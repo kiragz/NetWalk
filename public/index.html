@@ -1,0 +1,501 @@
+<!DOCTYPE html>
+<html lang="zh-CN" data-page-node-id="fiUyKVV29l6yFzYjn1GEV4">
+<head data-page-node-id="wwLPwwhPLt4fpjRxeVzEg0">
+<meta charset="utf-8" data-page-node-id="kdkv7ZGuTwUOmx10wtAzUd"/>
+<meta name="viewport" content="width=device-width, initial-scale=1" data-page-node-id="LnZougDz4hwUD5KGBQuXDJ"/>
+<title>NetWalk · 用网速和打字速度去散步</title>
+<link rel="stylesheet" href="/css/style.css" data-page-node-id="1gnVVVnCQzdk2OKbBmqgPb"/>
+</head>
+<body data-page-node-id="MsxxR3hsCWdDP32WVc0Jt4">
+<div id="app" data-page-node-id="PXdwTrEHzAKgAgxUQzQU31">
+  <div id="map" data-page-node-id="vPx9M1sIbI1bUnRfOAK0Y8"></div>
+
+  <header class="topbar" data-page-node-id="ddrJhtR5e5RhxcM4HEN3M4">
+    <div class="brand" data-page-node-id="8DH2ofHV66qbHEOc2uAOXh">Net<span data-page-node-id="Gt7m3YCBqixEngqyYKio6f">Walk</span></div>
+    <button class="ver-pill" id="btnAccount" title="账号与档案">👤 未登录</button>
+    <button class="ver-pill" id="btnVersion" title="查看版本更新概要">v0.8.1</button>
+    <div class="pill" id="pillMap" data-page-node-id="GjTS25Bi1mrlBafIXfCBl3">地图加载中</div>
+    <div class="pill" id="pillNet" data-page-node-id="Snjd11zKSBJFXSszeLhDMN">网络采集中</div>
+    <div class="pill" id="pillKey" data-page-node-id="h2AOMKNxwH67HjkAsxSCgU">击键采集中</div>
+    <div class="pill" id="pillScale" data-page-node-id="GGRwBGVEW0OCxs3nrxWwaR">城市尺度 1×</div>
+  </header>
+
+  <aside class="dock" id="dock" data-page-node-id="FPktGDZc1xJHDrtWZaiLi1">
+    <div class="dock-head" data-page-node-id="D8d5sjT1HHVMurfYBURwcG">
+      <h3 data-page-node-id="mys26WbrLB1nPQY8UyNAOU">实时面板</h3>
+      <div class="acts" data-page-node-id="qS4BFrbg79cesrWI1CUKkG">
+        <button class="icon-btn" id="btnPop" title="弹出独立 DOCK 窗口" data-page-node-id="qwwCXGp5BHB1wZVqX3pySe">⧉</button>
+        <button class="icon-btn" id="btnFold" title="收起面板" data-page-node-id="o76ha3Gm6Nn4rZTTPSG2RA">—</button>
+      </div>
+    </div>
+
+    <div class="metric-grid" data-page-node-id="ZXHEVgKQp6Cziej8kJxwcs">
+      <div class="metric down" data-page-node-id="PFORoFlGSi2MYIhcu9lmG5"><div class="lb" data-page-node-id="BNmO2SbCzjXf0XkIAFqgG5">↓ 下载</div><div class="vl" id="mDown" data-page-node-id="EU8A6ScOQOryWq5WP9fxXo">0<small data-page-node-id="qyqyfw7w6irBSiBbHu7Don">B/s</small></div></div>
+      <div class="metric up" data-page-node-id="YCqA3mL2BCQYoPUrh9oVAS"><div class="lb" data-page-node-id="pSqDHPfKtaikrESYxPvVWZ">↑ 上传</div><div class="vl" id="mUp" data-page-node-id="SFmvfyaHEmogJyYrbsSF0F">0<small data-page-node-id="KYRD6KFv5cKsFAegm9CnRH">B/s</small></div></div>
+    </div>
+    <div class="metric kpm" style="margin-bottom:12px" data-page-node-id="ldg8kGD7XBlCn0Zpumu2bi"><div class="lb" data-page-node-id="Oj74jyzYE108ED9dTQggPS">⌨ 打字速度</div><div class="vl" id="mKpm" data-page-node-id="gJHsoyRmgpHKx7yYq72u7e">0<small data-page-node-id="LqzKQFBsUGCAxzF9YD5k0t">KPM</small></div></div>
+
+    <div class="speed-block" data-page-node-id="VDMCTrBR0sJbQR5a6pRJWj">
+      <div class="speed-row" data-page-node-id="Z2etffWpYyrFomztqn03Pz">
+        <div class="speed-big" id="mSpeed" data-page-node-id="Fhj4POmntiArRX0K6Iq8fW">0.0<small data-page-node-id="K3SrEx4cQTAYHlklZAAHK7">km/h</small></div>
+        <div class="mode-tag" id="mMode" style="color:#8b98b5" data-page-node-id="GuvLLQq81KBM99WgoQESPn">🧍 待命</div>
+      </div>
+      <div class="bar" data-page-node-id="9N1qB3pcy43bdi0rCvIdWG"><i id="mBar" data-page-node-id="Vc434idQYbmHUCGKv6EkMB"></i></div>
+      <div class="bar-lb" data-page-node-id="pS8QGKyfrLrxRaAsWfC1bR"><span data-page-node-id="iBmAS7CAGrrJ27wMhONN7s">活动强度</span><span id="mIntensity" data-page-node-id="lR4J1fhOjV1CHMKyPJCeGF">0%</span></div>
+    </div>
+
+    <div class="info-list" data-page-node-id="3BQ19qSXcECrfDhGA7HkkJ">
+      <div class="info-row" data-page-node-id="K4XWLJVLakLLuVdBabFX9Y"><span class="k" data-page-node-id="vq1lEoDsEIGApoAYnzEHd0">位置</span><span class="v road" id="mRoad" data-page-node-id="CDgnzvqrY0RZeNpuS7HJqN">—</span></div>
+      <div class="info-row" data-page-node-id="MsaEkFcqM9J9U9CbPVVNbk"><span class="k" data-page-node-id="frYGAd0xgEuGXZyPGHExzb">段进度</span><span class="v" id="mSeg" data-page-node-id="zBYkWpefdZAPRUHPp71EE1">—</span></div>
+      <div class="info-row" data-page-node-id="L32s0ntCv8LNTbdRjcc6fy"><span class="k" data-page-node-id="1ZZFCmT9rqg58sjeQRTNRz">里程</span><span class="v" id="mDist" data-page-node-id="YoL5zEFq9O5thHevwiKdGZ">0.00 km</span></div>
+      <div class="info-row" data-page-node-id="adEEYvdcMH9IA840RvMFQC"><span class="k" data-page-node-id="lOfwewB0wpu2yUOL8zyi55">时长</span><span class="v" id="mDur" data-page-node-id="hkoroAbtQQ7AIrHR7FAGyM">00:00:00</span></div>
+      <div class="info-row" data-page-node-id="FDot4Oe1NjHscTlqnPQJJ7"><span class="k" data-page-node-id="GVpiZSnhAhQX6iQdN1vGUz">探索</span><span class="v" id="mVisited" data-page-node-id="IBetmKK2AlnrpWC4jmLqVz">0 条路</span></div>
+      <div class="info-row" data-page-node-id="RhDBCnMmfwv3kxunVlFVlk"><span class="k" data-page-node-id="zHyHiZktrCtu5txNOvghAH">点亮</span><span class="v" id="mLit" data-page-node-id="eYVlfZSEaYXbEM5BXpsT9G">0 块</span></div>
+      <div class="info-row" id="rowAmap" style="display:none" data-page-node-id="VwOA0b6UlIixmbJgHBzdsn"><span class="k" data-page-node-id="iOixqiCQIoQIa2o286Zdpw">高德调用</span><span class="v" id="mAmap" data-page-node-id="wRe0VFcBtGjrOTZgquqtAo">0 / 4000</span></div>
+      <div class="info-row" data-page-node-id="teF5V72iruURyJsuvCxdXz"><span class="k" data-page-node-id="hcusHGN3SHz9BArqCbUfKH">路口</span><span class="v" id="mRolls" data-page-node-id="maQHB6tMJHKKzDNQ0QbFd3">0 次</span></div>
+      <div class="info-row" data-page-node-id="jghIPFyab6vhOolRCLrrvX"><span class="k" data-page-node-id="wRFXnpG3vlDcElp7bxg8mk">均速</span><span class="v" id="mAvg" data-page-node-id="3wCyxgUqveOsg3bIlGi9gJ">0.0 km/h</span></div>
+    </div>
+
+    <div class="totals" data-page-node-id="FQKENB1wyHt0a3O41V6eGe">
+      <div class="totals-row" data-page-node-id="62rfUsJVWHdtrIZ9p8GRcg"><span class="lbl" data-page-node-id="FKHA11uaT7teMvVSbPFL5M">↓ 总下载</span><span class="vl" id="mRxTot" data-page-node-id="cxSghpzsECx99zOiCrDNmu">0 B</span></div>
+      <div class="totals-row" data-page-node-id="GaBAh8zQNgIj511X38lIEL"><span class="lbl" data-page-node-id="Zs0ws4FjrFQikCtZx2ucdm">↑ 总上传</span><span class="vl" id="mTxTot" data-page-node-id="lNXKAtSwLR308xY0ZBMJbs">0 B</span></div>
+      <div class="totals-row" data-page-node-id="kxdZk25oAX2r4zpKc6YqZz"><span class="lbl" data-page-node-id="HBPCR3sapNPm87rKBBQxAv">⌨ 总击键</span><span class="vl" id="mKeysTot" data-page-node-id="WwBaeEz2Uzs3LEeeTOnC5X">0 键</span></div>
+    </div>
+
+    <div class="roll-line" id="mRoll" data-page-node-id="akHDN17i5TO5JI9CXin4Is"><span class="dice" data-page-node-id="Qqx9r6y5yqOWJKMppHjoM5">🎲</span><span id="mRollTxt" data-page-node-id="lroq5kSHPSJL2wARaTgDLt">等待出发</span></div>
+
+    <div class="btn-row" data-page-node-id="9RmfZDUckLlXXR0yfPBL6Z">
+      <button class="btn primary" id="btnStart" data-page-node-id="Tk8wc9As3sfF0D3Xpkm5GT">出发</button>
+      <button class="btn" id="btnPause" disabled data-page-node-id="rHMXld7XiAm8VSMzzR53xn">暂停</button>
+      <button class="btn danger" id="btnEnd" disabled data-page-node-id="gw2QdkWBeMrtcGmCJrqomv">结束</button>
+    </div>
+
+    <div class="fn-row" data-page-node-id="E6qNPDUwm4HelgYUFg7qpb">
+      <button class="fn-btn" id="btnOverview" title="查看今日轨迹" data-page-node-id="AAXT0z6sy2Ft25YSWaADAf"><span data-page-node-id="20dMEdjxMFq8NVXBFVBgH6">📍</span>轨迹</button>
+      <button class="fn-btn" id="btnAch" title="成就墙" data-page-node-id="QtqT68Do4hWixMdQnT0JIk"><span data-page-node-id="vpgmdkz4LpXbGPtL80e0Sl">🏆</span>成就<i class="dot" id="achDot" data-page-node-id="AFYpdxGBsYIfuRoEHNaJ18"></i></button>
+      <button class="fn-btn" id="btnStats" title="日/月/年数据" data-page-node-id="gB5iqR34kWDB8bs70Po1Dh"><span data-page-node-id="8jmg3YDN0XPfCQboRXal0r">📊</span>数据</button>
+      <button class="fn-btn" id="btnArchive" title="存档码" data-page-node-id="vErEqJQlj4Fqh3cW0N1Rfs"><span data-page-node-id="cqDsA6htMOQ4ayfmjGzMFF">💾</span>存档</button>
+      <button class="fn-btn" id="btnSettings" title="设置：Key / 出发点 / 老板键 / 邮件服务"><span>⚙</span>设置</button>
+<button class="fn-btn" id="btnSync" title="一键同步：从邮箱取回最新存档码并恢复全部配置（需已配置邮件服务）"><span>🔄</span>同步</button>
+      <button class="fn-btn" id="btnReport" title="纯文字 Excel 风格报表（看上去像在加班）" data-page-node-id="6wanwqt4eIjgSbt3lmTmCr"><span data-page-node-id="7BGn9X6PFrLoHJcAEfChhU">📑</span>报表</button>
+      <button class="fn-btn" id="btnCopyArc" title="一键复制存档码（方便换设备导入）" data-page-node-id="j1CFCB87kQpjy7NNEJZHYE"><span data-page-node-id="eJPVCrkqfm0dieeS99U5MV">📋</span>复制码</button>
+      <button class="fn-btn" id="btnShare" title="生成分享图" data-page-node-id="UNwCueYkcwtFX8VnE9XaqN"><span data-page-node-id="G3KU8MRBi7nDVRvmdyeQBd">📤</span>分享</button>
+    </div>
+  </aside>
+
+  <button class="icon-btn" id="btnUnfold" style="position:absolute;top:16px;right:16px;z-index:29;width:34px;height:34px;font-size:15px;display:none;background:var(--panel);backdrop-filter:blur(14px)" data-page-node-id="rIgh4WXmyANINmepYmNFav">▤</button>
+
+  <!-- 地图点选提示条 -->
+  <div class="pick-bar" id="pickBar" data-page-node-id="LNDaarPidvqEdV1dlF5tLl">
+    <span class="pb-cross" data-page-node-id="ApkFOjQdlYi38tReLLyfEf">＋</span>
+    <span data-page-node-id="LuZ297C00ooIFwX79XYl9z">点击地图选择出发点</span>
+    <span class="pb-coord" id="pbCoord" data-page-node-id="hLzm1EGFSn4gnS0AHY3Ggp"></span>
+    <button class="btn sm" id="btnPickCancel" data-page-node-id="uMm6uIm86o74AAaAuktpjF">取消 (Esc)</button>
+  </div>
+
+  <div class="logpanel" data-page-node-id="Bwj6rlzRiRiPvBvDiOzcim">
+    <h4 data-page-node-id="BZMwITpIVzuzkuFWMXQAQh">漫游日志</h4>
+    <div class="log-list" id="logList" data-page-node-id="SDOHSjtsMqk2TWSAkd2UPA"></div>
+  </div>
+</div>
+
+<!-- 设置弹窗 -->
+<div class="modal-mask" id="maskSettings" data-page-node-id="he3figjo6riBZhRVeJ0dTF">
+  <div class="modal" data-page-node-id="mwsgx7pGmDwJAPEyeza5At">
+    <h2 data-page-node-id="brL2ijBVuy5EOQpzKRIqq4">地图与漫游设置</h2>
+    <div class="desc" data-page-node-id="8zBy4zjyDkBbJMwfxAdAFU">NetWalk 把你的下载/上传速率和打字速度，换算成走路或跑步的速度，让一个分身在地图上替你走完这一天。</div>
+
+    <div id="keyNotice" class="notice" data-page-node-id="QPqeGpGxwOG0fbGn31AAes">
+      当前未配置高德 Key，处于<b data-page-node-id="E5MVLaYRdbgHbGDjIGh8oP">演练模式</b>：使用程序生成的虚构城市路网，玩法完整但路名为虚构。
+      配置高德 Key 后可切换为真实城市路网与真实路名。
+    </div>
+
+    <div class="field" data-page-node-id="FEAXyygbTvsxlkW5J1t5FZ">
+      <label data-page-node-id="r2ds6YgOlWDCTAq14IBjHe">高德 Web 端（JS API）Key <span class="tag-opt" data-page-node-id="jAG7JnmyqeXLm4CnJBHguC">可选</span></label>
+      <input type="text" id="cfgKey" placeholder="留空则使用演练模式（虚构路网，照样能玩）" autocomplete="off" data-page-node-id="awc8n8nPuDTgGB6loZprCi"/>
+      <div class="hint" data-page-node-id="HNX39Wf9vrz1MfPyySCHoD">
+        <b data-page-node-id="BAKGvhrTr6LSclNO2TpnhR">请用你自己的手机号申请</b>，不要填别人的 Key。步骤：手机号注册
+        <a href="https://console.amap.com/dev/id/phone" target="_blank" rel="noreferrer" data-page-node-id="UN7ibd2EUd5vmWAydojtHW">高德开放平台</a>
+        → 完成<b data-page-node-id="XNweF0eAqnc0jcX6Al1UFD">个人实名认证</b> → 应用管理 → 创建新应用 → 添加 Key →
+        服务平台务必选「<b data-page-node-id="LWzA8JyElqNRpTBjT74LK9">Web 端 (JS API)</b>」（选错会不可用）。<br data-page-node-id="4FgeuG9rRRAZR8TwQ7CIem"/>
+        免费额度：个人认证开发者每天 5000 次，够用（本游戏已内置调用量软上限，见下方说明）。<br data-page-node-id="JFHYVuVA8WjeO1f0yFsove"/>
+        Key 只保存在本机 <code data-page-node-id="pvmSALxcKMC0xyU0uh04sJ">data/config.json</code>，<b data-page-node-id="5zzMuCn9Y6oUlTr7FBIyUA">不会上传</b>，也不会写进分享图或存档码。
+      </div>
+    </div>
+    <div class="field" data-page-node-id="EySCZgMA1i7YvTJWjVD4Ht">
+      <label data-page-node-id="j8OXpOaGHzAX37w80E1ATC">高德安全密钥（控制台要求时填写） <span class="tag-opt" data-page-node-id="ovEXRlAWIWyef7sIpeMKsJ">可选</span></label>
+      <input type="text" id="cfgSec" placeholder="启用静态安全密钥的 Key 必填" autocomplete="off" data-page-node-id="72xrQsElfWItuGM3oqUYwF"/>
+      <div class="hint" data-page-node-id="QqemceEIWlMuiYKc2eXhgK">与 Key 一起在控制台生成，同样只保存在本机。</div>
+    </div>
+
+    <div class="notice warn" data-page-node-id="XgR2CwqSbKXtipLQePqzA5">
+      <b data-page-node-id="52ibAizHKCp6NBi6T33aVI">⚠ 分享给别人之前：</b>不要把 <code data-page-node-id="XQ4Q1LKULHhM3L7sAHbEgj">data/config.json</code> 一起发出去（里面存着你的 Key）。
+      只发代码目录即可 —— 项目已内置 <code data-page-node-id="0VBDOUJnA4dDyHcTdtsSDk">.gitignore</code> 忽略 <code data-page-node-id="Pw9nlAIIGrTPeUqmgF6Xjt">data/</code>，
+      对方打开设置用<b data-page-node-id="vEJxWrCGHHgwhjxvkMjh9F">自己的手机号</b>申请 Key，或者什么都不填直接玩演练模式。
+    </div>
+
+    <div class="field" data-page-node-id="mM5GlOFCeDx5Bg5Zro6ynX">
+      <label data-page-node-id="5eLrzDeR5DvPC7Q063LqHg">出发点<span id="originLockHint" style="display:none;color:#ffb020;font-weight:400"> · 已注册：修改出发点需走下方「重置」</span></label>
+      <div class="origin-cur" data-page-node-id="ekNIwvVkW9JzqRNCEnhGL1">
+        <span class="oc-name" id="orCurName" data-page-node-id="rQuZ3QhB8JAnDWAqhLGv0L">城市中心</span>
+        <span class="oc-coord" id="orCurCoord" data-page-node-id="YA4AWtLFBfjY5fthisPBPN">—</span>
+      </div>
+      <div class="or-line" data-page-node-id="JDG2B0cf7XCvVa6CRTik4i">
+        <input type="text" id="orSearch" placeholder="输入地址或地点名，如 深圳湾公园" autocomplete="off" data-page-node-id="87fyRGvjko2cyZS3n4fiod"/>
+        <button class="btn sm" id="btnOrSearch" data-page-node-id="n7GyJJ1ejIbHEJucxxoJQT">搜索定位</button>
+      </div>
+      <div class="or-line wrap" data-page-node-id="d4OXTJkqZfWgZx0a87J82U">
+        <button class="btn sm" id="btnOrPick" data-page-node-id="gYAZdG2hGeNOHzLoj8dhzs">在地图上点选</button>
+        <button class="btn sm" id="btnOrGeo" data-page-node-id="NM1qt5jX7pNrfvcHiwBpVs">用我的当前定位</button>
+        <button class="btn sm" id="btnOrReset" data-page-node-id="2Aegpexo8nrv67v2DbDwmB">恢复城市中心</button>
+      </div>
+      <div class="row2" data-page-node-id="ucGvz44ez2E0GmwuttJMVV">
+        <div class="field" data-page-node-id="mvNhlwycDDzLXHv3HkCC09">
+          <label data-page-node-id="O2R0VPmI5nnPHEV0eNSsfD">经度</label>
+          <input type="text" id="orLng" placeholder="114.057868" autocomplete="off" data-page-node-id="EezCicVFdikpVR0iXA8aCT"/>
+        </div>
+        <div class="field" data-page-node-id="twWVivrmuaQRheeRoqeCGS">
+          <label data-page-node-id="fkn9rm6KDkjkXA3mzpZzcu">纬度</label>
+          <input type="text" id="orLat" placeholder="22.543099" autocomplete="off" data-page-node-id="WtzwtzWdy7blca9pXeQTqa"/>
+        </div>
+      </div>
+      <div class="hint" id="orHint" data-page-node-id="CCPo3ZIu9wVsvhKuQsgRmQ">搜索、点选或手填坐标都可以；保存并重启漫游后，分身在「出发」时会从这一点开始走。</div>
+    </div>
+
+    <div class="row2" data-page-node-id="uRWwMAIJkrrqxC55rCwfEp">
+      <div class="field" data-page-node-id="DA2YrBCIKYeLlv9sENoILR">
+        <label data-page-node-id="b9GYDDgw6eqSNtov174JFo">漫游城市</label>
+        <select id="cfgCity" data-page-node-id="eV73WgUl2ebBkk89hHKXYV">
+          <option value="深圳" data-page-node-id="FS4ocNk1kjYBHEEwy8zEZo">深圳</option>
+          <option value="北京" data-page-node-id="gqGgkMgL9kmRW5BT9XHUCZ">北京</option>
+          <option value="上海" data-page-node-id="BQNHw3emhEqils5YdAYrzH">上海</option>
+          <option value="广州" data-page-node-id="urjuNGfjwwWGlDASgDGfXB">广州</option>
+          <option value="杭州" data-page-node-id="7MKukF2RlxETo6PBPfe3F6">杭州</option>
+          <option value="成都" data-page-node-id="abcrCb8xWe7e8yV6Y509qw">成都</option>
+          <option value="武汉" data-page-node-id="pZM1wKifu5FU13TmBWfnwj">武汉</option>
+          <option value="西安" data-page-node-id="8CR9jzgeDvF0xEWvcH1hhD">西安</option>
+          <option value="南京" data-page-node-id="RYGSea9ee7gdNjMiYFYoo8">南京</option>
+          <option value="重庆" data-page-node-id="tWLV3WJ5RGE07MxThsBxpz">重庆</option>
+        </select>
+      </div>
+      <div class="field" data-page-node-id="uY4Vj5lIvi8ZxpYku4ECht">
+        <label data-page-node-id="brXwULK8oF25h3J0CKorw2">地图尺度</label>
+        <select id="cfgScope" data-page-node-id="dPGI6Lc9NE8uEcJdhkkVer">
+          <option value="city" data-page-node-id="v6ARJriPnDN2cUMGpoUW5y">城市（1×，进度最快）</option>
+          <option value="china" data-page-node-id="0FVnyDFfRoKRuP7oNqC7Qk">全中国（50×）</option>
+          <option value="world" data-page-node-id="DS23qAFk59DgUqUGPW3DD9">全世界（500×）</option>
+        </select>
+      </div>
+    </div>
+
+    <div class="field" data-page-node-id="Mml3RSkuDlAPKYGAEMfu4w">
+      <label data-page-node-id="VVZzoebNuBmQmQyhdOLAQN">老板键 <span class="tag-opt" data-page-node-id="u4S73BFsCu0L1fur8zUZMJ">Windows 桌面版</span></label>
+      <div class="or-line wrap" data-page-node-id="qH3APIxQ79yNzWfp0sq4yB">
+        <select id="cfgBossKey" style="flex:1;min-width:200px" data-page-node-id="K2rzvHOd31BLpU34Xi8V8z">
+          <option value="67|" data-page-node-id="kENSFwik3343fZRk11IjW6">F9（默认 · 单键最快）</option>
+          <option value="68|" data-page-node-id="RXdSWxFaskiG5Lg5XHWeJ0">F10</option>
+          <option value="87|" data-page-node-id="tJdBZigFk0w5WI3zKDv5DA">F11</option>
+          <option value="88|" data-page-node-id="XKYlyNxUtn2LxE7F9AYubL">F12</option>
+          <option value="35|ctrl,shift" data-page-node-id="FqtAzp4Aq6DOl94h0wAaUd">Ctrl + Shift + H</option>
+          <option value="49|ctrl,alt" data-page-node-id="CLaKmZzqxi2caI2QwCLXEi">Ctrl + Alt + N</option>
+        </select>
+        <button class="btn sm" id="btnBossTest" data-page-node-id="15WB0Px9IVy3v5Xd2AO25B">现在就藏一下</button>
+      </div>
+      <div class="hint" data-page-node-id="r2BpHa8UnWKcB9FhXFzeFM">
+        按下后所有<b data-page-node-id="EH3XUiFRyRkehGrtFO9Owx">浏览器窗口</b>和 NetWalk 自己的窗口会立刻藏起来，任务栏右下角只留一个小图标；
+        再按一次（或双击小图标）全部原样恢复，游戏在后台照常走。
+        <span id="bossHint" style="display:block;margin-top:4px;color:#8b98b5" data-page-node-id="L81WVvW1256xGbJwBlwuMV"></span>
+      </div>
+      <label class="boss-on" data-page-node-id="vHDccFLUuNpTMuaa2Wim5W"><input type="checkbox" id="cfgBossOn" checked data-page-node-id="xrxfgXcAa9Al4B3ooHPtBJ"/> 启用老板键</label>
+    </div>
+
+      <details open>
+        <summary style="cursor:pointer;font-size:11px;color:var(--txt-dim)">📮 配置邮件服务（可选）：注册/登录时自动把最新存档码发到你邮箱</summary>
+        <div class="field" style="margin-top:8px">
+          <label>SMTP 服务器 / 端口</label>
+          <div class="or-line">
+            <input type="text" id="mailHost" placeholder="smtp.qq.com" autocomplete="off" style="flex:2"/>
+            <input type="text" id="mailPort" placeholder="465" autocomplete="off" style="flex:1"/>
+          </div>
+          <label style="margin-top:6px">邮箱账号 / SMTP 授权码（不是登录密码）</label>
+          <div class="or-line">
+            <input type="text" id="mailUser" placeholder="xxx@qq.com" autocomplete="off" style="flex:1"/>
+            <input type="password" id="mailPass" placeholder="授权码" autocomplete="off" style="flex:1"/>
+          </div>
+          <div class="btn-row">
+            <button class="btn sm" id="btnMailSave">保存邮件配置</button>
+            <button class="btn sm" id="btnMailRestore" title="换新设备时点这个：自动从邮箱取回高德 Key、安全密钥、SMTP/IMAP 授权码">📥 从邮箱恢复配置</button>
+            <span class="hint" id="mailHint"></span>
+          </div>
+          <div class="hint">QQ 邮箱：设置 → 账户 → 开启 SMTP → 生成授权码。163 邮箱同理。</div>
+          <div class="or-line" style="margin-top:8px">
+            <input type="text" id="mailImapHost" placeholder="IMAP 服务器，如 imap.qq.com（出发时自动从邮箱续存档用）" autocomplete="off" style="flex:2"/>
+            <input type="text" id="mailImapPort" placeholder="993" autocomplete="off" style="flex:1"/>
+          </div>
+          <div class="hint">配好 IMAP 后：每次点「出发」都会自动从邮箱取回最新存档并从上次结束点继续；高德 Key 和安全密钥也会随存档码发到邮箱，换设备一键恢复。</div>
+        </div>
+      </details>
+
+    <div class="field" id="rowResetZone" style="border-top:1px dashed var(--line);padding-top:12px;margin-top:6px">
+      <label>危险区 · 档案</label>
+      <div class="hint" id="profileInfo">加载中…</div>
+      <div class="btn-row" style="margin-top:6px">
+        <button class="btn" id="btnOpenReset" style="color:#ff5d5d;border-color:#ff5d5d">重置出发点与全部数据…</button>
+      </div>
+    </div>
+
+    <div class="modal-acts" data-page-node-id="sbjotR7VSDS5Rb9b9ffLfc">
+      <button class="btn primary" id="btnSaveCfg" data-page-node-id="sNpnsTbouyYWiTHEZtaw6a">保存并重启漫游</button>
+      <button class="btn" id="btnCloseCfg" data-page-node-id="ReVcRbCoCFjePvlUHg6ZDT">取消</button>
+    </div>
+  </div>
+</div>
+
+<!-- 结束浮层 -->
+<div class="modal-mask" id="maskDone" data-page-node-id="z9LHCTvEyYN6w37hfndEbz">
+  <div class="modal" data-page-node-id="VlfJALACPM5h0llDJWMmCs">
+    <h2 id="doneTitle" data-page-node-id="zXH7sBUFuBFuoNsb04vCS2">今天的漫游结束了</h2>
+    <div class="desc" id="doneDesc" data-page-node-id="xfl4Gn1gcE1ojxcSQY4EPf">数据已保存到本机，日报已生成。</div>
+    <div class="done-stats" id="doneStats" data-page-node-id="UCTo9U4NnnCxASZrKfOwUe"></div>
+    <div class="field" style="margin-top:14px" data-page-node-id="vH01oEGafwgOJx656j9gsd">
+      <label data-page-node-id="8dJplogGWZijrbHSFTDimv">存档码 <span style="font-weight:400;color:var(--txt-dim)" data-page-node-id="jVP3n3RLaB0Y4WgXJQwDEU">（复制到其他设备的 NetWalk 里导入，即可继承全部数据与成就）</span></label>
+      <textarea id="doneArc" class="code-area" readonly placeholder="生成中…"></textarea>
+      <div class="btn-row" data-page-node-id="UwepYK7pHwLcK2TFgWs6bF">
+        <button class="btn" id="btnDoneArcCopy" data-page-node-id="dMrcuWGqTEUHQe6bk3tS0S">📋 复制存档码</button>
+      </div>
+    </div>
+    <div class="modal-acts" data-page-node-id="arsNlqig33x5S6gbPNKq3N">
+      <button class="btn primary" id="btnOpenReport" data-page-node-id="AvZeJHp5PJUXrdQcoABhFc">打开今日日报</button>
+      <button class="btn" id="btnRestart" data-page-node-id="OsBvOadDyr6DxI13mb3Kyq">再走一会儿</button>
+    </div>
+  </div>
+</div>
+
+<!-- 今日总览 -->
+<div class="modal-mask" id="maskOverview" data-page-node-id="Gp2feXkPIJ6xJRmu2ldxia">
+  <div class="modal overview-modal" data-page-node-id="FMBIEvlJFkXAjiOvUQMqpn">
+    <h2 data-page-node-id="pWWD4ST1hxU9JZpGijPYXT">轨迹总览</h2>
+    <div class="desc" id="ovDesc" data-page-node-id="vNENOuPG3GCaHoTNSYEsRz">实时显示你今天走过的全部路径、起终点和当前位置</div>
+    <div class="btn-row" style="margin:8px 0">
+      <button class="btn sm ov-range-btn on" data-ov="today">今天</button>
+      <button class="btn sm ov-range-btn" data-ov="day">某一天</button>
+      <button class="btn sm ov-range-btn" data-ov="range">时间段</button>
+      <select id="ovDate" style="display:none;flex:1" title="选择要回看的日期"></select>
+      <input type="date" id="ovFrom" style="display:none;flex:1" title="开始日期"/>
+      <input type="date" id="ovTo" style="display:none;flex:1" title="结束日期"/>
+    </div>
+    <div class="ov-summary" id="ovSummary" data-page-node-id="AHHBD5niHKYCg0EqNC4Mco"></div>
+    <div id="ovSvg" data-page-node-id="imo9g5CmmuwgGL0kRqBcKG"></div>
+    <div class="ov-legend" data-page-node-id="G5ExPHydslSQBCg48CTQUD"><span>慢</span><i style="display:inline-block;width:140px;height:8px;border-radius:4px;background:linear-gradient(90deg,#ffe978,#ff823c,#e02020);vertical-align:middle"></i><span>快（颜色越深速度越快）</span></div>
+    <div class="modal-acts" data-page-node-id="C3DwlSwFAxDkvGJIANcS3b">
+      <button class="btn primary" id="btnOvClose" data-page-node-id="DBXSEqWFq3O06GZn7LI3JM">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- 成就墙 -->
+<div class="modal-mask" id="maskAch" data-page-node-id="sHO0sjm03IF9zO9KmUxgR5">
+  <div class="modal ach-modal" data-page-node-id="qyfJhvbgKFkODcXkYzfOMC">
+    <h2 data-page-node-id="ZHk9fef6zZ6bdtd2m3z0wM">成就墙</h2>
+    <div class="desc" data-page-node-id="olsZa5qUugS1VMti7n9pYL">数据替你走路，也替你拿勋章。</div>
+    <div id="achBody" data-page-node-id="t6TzziXOG0nMTpIS3GzPX3"></div>
+    <div class="modal-acts" data-page-node-id="7LzCwfYndpvHku3kSYrQSA">
+      <button class="btn primary" id="btnAchClose" data-page-node-id="lbWUBZiwbpUSOmTUcOiMpv">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- 日 / 月 / 年 数据 -->
+<div class="modal-mask" id="maskStats" data-page-node-id="jzHqoRTieIbUHNx6nYfMNf">
+  <div class="modal stats-modal" data-page-node-id="RhUcrR7WXG7v668qZmzrdW">
+    <h2 data-page-node-id="lbjGEHmjWfpQfK2fIsahqB">漫游数据</h2>
+    <div class="desc" data-page-node-id="uZIOpvq6M8tLP1ucfxHrlH">按日 / 月 / 年查看你的漫游记录。</div>
+    <div class="ach-tabs" id="statsTabs" data-page-node-id="1Q7r7qL6KB806GCrji30V4">
+<button class="ach-tab on" data-range="day" data-page-node-id="ROnpxAy1Hz2dH8LGEUWplu">本日</button>
+<button class="ach-tab" data-range="week">本周</button>
+<button class="ach-tab" data-range="month" data-page-node-id="HetAIaKzNnn0rYyqfM3xmG">本月</button>
+      <button class="ach-tab" data-range="year" data-page-node-id="1xgQKI02SJDL7AjPxZeHJO">本年</button>
+      <button class="ach-tab" data-range="all" data-page-node-id="x2DhJFBPrEkLFVj7xJVfuG">全部</button>
+    </div>
+    <div class="stats-grid" id="statsGrid" data-page-node-id="3TqHbTyirhHFp7PuiPaeka"></div>
+    <div id="statsDaily" data-page-node-id="DqSjqTb6DOKzA4GZpMMTmi"></div>
+    <div class="modal-acts" data-page-node-id="Jq351zElvaAVjqqAciFJsX">
+      <button class="btn primary" id="btnStatsClose" data-page-node-id="4VLyMIuq83vyRCqfbLb16P">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- 账号与档案 -->
+<div class="modal-mask" id="maskAccount">
+  <div class="modal">
+    <h2>账号与档案</h2>
+    <div class="desc" id="accDesc">每个账号是一份独立的漫游档案：轨迹、成就、出发点完全隔离。</div>
+
+    <div id="accLogged" style="display:none">
+      <div class="origin-cur">
+        <span class="oc-name" id="accCurName">—</span>
+        <span class="oc-coord" id="accCurEmail">—</span>
+      </div>
+      <div class="or-line">
+        <input type="text" id="accNewName" placeholder="给档案起个新名字" maxlength="20" autocomplete="off"/>
+        <button class="btn sm" id="btnAccRename">改名</button>
+      </div>
+      <hr class="sep"/>
+      <div class="notice warn" style="font-size:11px">
+        ⚠ 重置会<b>清空这个账号的全部漫游轨迹与成就</b>，并把出发点恢复为城市中心，<b>不可恢复</b>。
+        想清楚再输「<b>重置</b>」两个字。
+      </div>
+      <div class="or-line">
+        <input type="text" id="accResetText" placeholder="输入：重置" autocomplete="off"/>
+        <button class="btn danger sm" id="btnAccReset">重置出发点与数据</button>
+      </div>
+      <div class="hint" id="accResetHint"></div>
+      <div class="btn-row">
+        <button class="btn" id="btnAccLogout">退出账号（回到默认档案）</button>
+      </div>
+    </div>
+
+    <div id="accLogin">
+      <div class="field">
+        <label>邮箱</label>
+        <input type="email" id="accEmailInput" placeholder="用于收验证码；未配置邮件服务时验证码直接显示在下方" autocomplete="off"/>
+      </div>
+      <div class="or-line">
+        <input type="text" id="accCode" placeholder="6 位验证码" maxlength="6" autocomplete="one-time-code"/>
+        <button class="btn sm" id="btnAccCode">获取验证码</button>
+      </div>
+      <div class="hint" id="accCodeHint" style="color:#58c0ff;font-weight:600"></div>
+      <div class="field">
+        <label>档案名 <span class="tag-opt">给替你走路的分身起个名字</span></label>
+        <input type="text" id="accNameInput" placeholder="例如：打工人脚替" maxlength="20" autocomplete="off"/>
+      </div>
+      <div class="btn-row">
+        <button class="btn primary" id="btnAccRegister">注册新档案</button>
+        <button class="btn" id="btnAccLogin">用验证码登录</button>
+      </div>
+      <div class="hint">出发点只在创建档案时设置一次；之后每次出发都从上次结束的位置继续（跨天也是）。</div>
+      <hr class="sep"/>
+    </div>
+
+    <div class="modal-acts">
+      <button class="btn primary" id="btnAccClose">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- 旅行者注册 -->
+<div class="modal-mask" id="maskRegister">
+  <div class="modal">
+    <h2>创建你的旅行者档案</h2>
+    <div class="desc">起一个名字，选一个出发点 —— 之后分身每次出发都会<b>从上次结束的位置继续</b>，替你走遍中国与世界。</div>
+    <div class="field">
+      <label>旅行者名字</label>
+      <input id="rgName" maxlength="24" placeholder="比如：广漂打工人" />
+    </div>
+    <div class="field">
+      <label>邮箱（用于接收验证码）</label>
+      <input id="rgEmail" placeholder="you@example.com" />
+    </div>
+    <div class="field">
+      <label>验证码</label>
+      <div class="btn-row">
+        <input id="rgCode" maxlength="6" placeholder="6 位数字" style="flex:1" />
+        <button class="btn" id="btnRgSend">发送验证码</button>
+      </div>
+      <div class="hint" id="rgHint">单机版暂未接入邮件服务：验证码会直接显示在这里（将来接入邮箱后改为真实发送）。</div>
+    </div>
+    <div class="field">
+      <label>出发点（只在此刻设定一次）</label>
+      <select id="rgCity"></select>
+      <div class="hint">想改出发点只能重置全部数据（有二次确认），所以想好从哪里出发。</div>
+    </div>
+    <div class="modal-acts">
+      <button class="btn primary" id="btnRgDone">完成注册</button>
+      <button class="btn" id="btnRgSkip">稍后再说</button>
+    </div>
+  </div>
+</div>
+
+<!-- 重置出发点与全部数据 -->
+<div class="modal-mask" id="maskReset">
+  <div class="modal">
+    <h2>⚠ 重置出发点与全部数据</h2>
+    <div class="desc">此操作将<b>永久删除</b>你的全部漫游轨迹、成就、统计与存档码，<b>不可恢复</b>。
+      出发点将改为你在下面选择的新位置，分身从新起点重新开始。</div>
+    <div class="field">
+      <label>新的出发点（城市）</label>
+      <select id="rsCity"></select>
+    </div>
+    <div class="field">
+      <label>请一字不差输入下面这句话，以确认你知晓后果</label>
+      <div class="hint"><code id="rsPhrase">我已知重置将删除全部漫游数据且不可恢复</code></div>
+      <input id="rsConfirm" placeholder="把上面那句话原样输入到这里" />
+    </div>
+    <div class="modal-acts">
+      <button class="btn danger" id="btnRsGo">我确认，重置</button>
+      <button class="btn" id="btnRsCancel">取消</button>
+    </div>
+  </div>
+</div>
+
+<!-- 版本更新概要 -->
+<div class="modal-mask" id="maskVersion" data-page-node-id="jt6i6FVKbXslSNX7Jx99n7">
+  <div class="modal" data-page-node-id="65SCr33SdBrlO9QzfLHMtS">
+    <h2 data-page-node-id="v7Ip2T5G9GD3hfbXfv3uDj">版本更新概要</h2>
+    <div class="desc" id="verDesc" data-page-node-id="tToKVBrEEHhUadJ9FJaAb6">当前版本加载中…</div>
+    <div id="verBody" class="ver-body" data-page-node-id="2oAswJXBG0efT2S3bI8GJb"></div>
+    <div class="modal-acts" data-page-node-id="bn48VCPu8hSL0KCCeMoNwN">
+      <button class="btn primary" id="btnVerClose" data-page-node-id="t716Auvo6HpR3FSsIvA8KQ">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- 存档码 -->
+<div class="modal-mask" id="maskArchive" data-page-node-id="vcJfkhfoNgT8tMHspqrYaT">
+  <div class="modal" data-page-node-id="ieYGX0wUx36l2bacsH4Z77">
+    <h2 data-page-node-id="sFtxOFRvVUHhuHO11EHOWL">存档码</h2>
+    <div class="desc" data-page-node-id="lpz4JJ0sknBHiNiNDaWlIa">把存档码复制到另一台电脑的 NetWalk 里导入，即可继承全部漫游数据与成就。</div>
+    <div class="field" data-page-node-id="SJuWRnVpAOxDhst3j2JB9p">
+      <label data-page-node-id="aq4eZUdPYsi0QlDMRuEFbW">我的存档码</label>
+      <textarea id="arCode" class="code-area" readonly placeholder="点击下方按钮生成"></textarea>
+      <div class="hint" id="arHint" data-page-node-id="N3FH69oGo1ZAf55i9V40k2">存档码只包含漫游数据，不含任何账号信息，可直接分享或备份。</div>
+    </div>
+    <div class="btn-row" data-page-node-id="A8eoJozdbZFXWtE8Gw4E1X">
+      <button class="btn" id="btnArGen" data-page-node-id="f79jM0ATWzj9p5x9CYpFLA">生成存档码</button>
+      <button class="btn" id="btnArCopy" data-page-node-id="IQ1QqBrj19R6OCuXqIDT6Y">复制</button>
+    </div>
+    <hr class="sep" data-page-node-id="sqYlpd1TyDpKapDvMXv0DT"/>
+    <div class="field" data-page-node-id="HNBROD7VGUJfg959uh4PaC">
+      <label data-page-node-id="xEwWKhXCYqdpJiHyRZyEVy">导入他人 / 自己的存档码</label>
+      <textarea id="arInput" class="code-area" placeholder="把存档码粘贴到这里…"></textarea>
+    </div>
+    <div class="modal-acts" data-page-node-id="lprQJ9oD9QPbzxtVgulZqE">
+      <button class="btn primary" id="btnArImport" data-page-node-id="pCmWtlfe5Gy0dgUrObaa3R">导入并合并</button>
+      <button class="btn" id="btnArClose" data-page-node-id="9n8fHyGF2CH4wg9ZKhUT9f">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- 分享 -->
+<div class="modal-mask" id="maskShare" data-page-node-id="RxyM2Rdv9Faoktritk5ls8">
+  <div class="modal share-modal" data-page-node-id="bpIGXS9lSrC88cfS5OsfYJ">
+    <h2 data-page-node-id="PiDFn4pI1CrfrFYvYOyfW1">生成分享图</h2>
+    <div class="desc" data-page-node-id="sTR0O7MgIHSkjCBMio5gSN">一键生成今日漫游卡片，可直接发朋友圈 / 群聊。</div>
+    <div class="share-preview" data-page-node-id="zMn6gbvGZWeH1TH2Q4SGBE"><canvas id="shareCanvas" width="750" height="1000" data-page-node-id="HvCEZVcaEJwU5iBiGtBQ4I"></canvas></div>
+    <div class="modal-acts" data-page-node-id="KyqnUFGDXy7ghzpcUE32Hg">
+      <button class="btn primary" id="btnShareSave" data-page-node-id="eLTlzNa9IMVql9uimdms28">保存图片</button>
+      <button class="btn" id="btnShareCopy" data-page-node-id="K9qZDFOTt2ivHfA8u4IKMM">复制文案</button>
+      <button class="btn" id="btnShareClose" data-page-node-id="Qf7izRXeR9kZsqtIx1loBm">关闭</button>
+    </div>
+  </div>
+</div>
+
+<script src="/js/speed.js"></script>
+<script src="/js/achievements.js"></script>
+<script src="/js/provider-drill.js"></script>
+<script src="/js/provider-amap.js"></script>
+<script src="/js/engine.js"></script>
+<script src="/js/share.js"></script>
+<script src="/js/app.js"></script>
+</body>
+</html>

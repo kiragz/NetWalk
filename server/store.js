@@ -1,0 +1,411 @@
+/**
+ * 轨迹与日报持久化（本地 JSON，按天分文件）
+ */
+const fs = require('fs');
+const path = require('path');
+
+function todayStr(d = new Date()) {
+  const y = d.getFullYear();
+  const m = String(d.getMonth() + 1).padStart(2, '0');
+  const day = String(d.getDate()).padStart(2, '0');
+  return `${y}-${m}-${day}`;
+}
+
+const EARTH_R = 6371000;
+const CELL_DEG = 0.00135; // 约 150m 网格，用于「点亮街区」统计
+
+function haversine(a, b) {
+  const toRad = (x) => (x * Math.PI) / 180;
+  const dLat = toRad(b.lat - a.lat);
+  const dLng = toRad(b.lng - a.lng);
+  const la1 = toRad(a.lat);
+  const la2 = toRad(b.lat);
+  const h = Math.sin(dLat / 2) ** 2 + Math.cos(la1) * Math.cos(la2) * Math.sin(dLng / 2) ** 2;
+  return 2 * EARTH_R * Math.asin(Math.sqrt(h));
+}
+
+function cellKey(lat, lng) {
+  if (!Number.isFinite(lat) || !Number.isFinite(lng)) return '';
+  return `${Math.round(lat / CELL_DEG)},${Math.round(lng / CELL_DEG)}`;
+}
+
+/** 从最后一天往前数连续活跃天数 */
+function streak(dates) {
+  if (!dates.length) return 0;
+  const sorted = [...dates].sort();
+  let n = 1;
+  for (let i = sorted.length - 1; i > 0; i--) {
+    const cur = new Date(`${sorted[i]}T00:00:00`);
+    const prev = new Date(`${sorted[i - 1]}T00:00:00`);
+    const diffDays = Math.round((cur - prev) / 86400000);
+    if (diffDays === 1) n++;
+    else break;
+  }
+  return n;
+}
+
+class TrackStore {
+  constructor(baseDir) {
+    this.dir = path.join(baseDir, 'tracks');
+    fs.mkdirSync(this.dir, { recursive: true });
+    this.cache = new Map(); // date -> data
+    this.dirty = new Set();
+    this._flushTimer = setInterval(() => this.flush(), 8000);
+    if (this._flushTimer.unref) this._flushTimer.unref();
+  }
+
+  file(date) {
+    return path.join(this.dir, `${date}.json`);
+  }
+
+  load(date) {
+    if (this.cache.has(date)) return this.cache.get(date);
+    let data = null;
+    const f = this.file(date);
+    if (fs.existsSync(f)) {
+      try {
+        data = JSON.parse(fs.readFileSync(f, 'utf8'));
+      } catch (_) {
+        data = null;
+      }
+    }
+    if (!data) {
+      data = {
+        date,
+        startedAt: Date.now(),
+        endedAt: null,
+        city: '',
+        path: [],
+        samples: [],
+        rolls: [],
+        stats: null,
+      };
+    }
+    this.cache.set(date, data);
+    return data;
+  }
+
+  markDirty(date) {
+    this.dirty.add(date);
+  }
+
+  flush() {
+    for (const date of this.dirty) {
+      const data = this.cache.get(date);
+      if (!data) continue;
+      try {
+        const f = this.file(date);
+        const tmp = `${f}.tmp`;
+        fs.writeFileSync(tmp, JSON.stringify(data), 'utf8');
+        fs.renameSync(tmp, f);
+      } catch (err) {
+        console.error('[store] 写入失败', date, err.message);
+      }
+    }
+    this.dirty.clear();
+  }
+
+  /** 追加轨迹点（前端已按距离节流） */
+  appendPath(date, points) {
+    if (!Array.isArray(points) || points.length === 0) return 0;
+    const data = this.load(date);
+    for (const p of points) {
+      if (!Number.isFinite(p.lat) || !Number.isFinite(p.lng)) continue;
+      data.path.push({
+        t: p.t || Date.now(),
+        lat: Number(p.lat.toFixed(6)),
+        lng: Number(p.lng.toFixed(6)),
+        road: p.road || '',
+        spd: Number((p.spd || 0).toFixed(2)),
+        mode: p.mode || 'walk',
+      });
+    }
+    this.markDirty(date);
+    return data.path.length;
+  }
+
+  /** 追加一条环境采样（网速/打字/换算速度），用于报告统计 */
+  appendSample(date, s) {
+    const data = this.load(date);
+    data.samples.push({
+      t: s.t || Date.now(),
+      rx: Math.round(s.rx || 0),
+      tx: Math.round(s.tx || 0),
+      kpm: Math.round(s.kpm || 0),
+      spd: Number((s.spd || 0).toFixed(2)),
+      mode: s.mode || 'walk',
+      // 引擎累计的「真实步行里程」（米）。地图尺度会放大坐标位移，
+      // 因此不能用轨迹几何长度当作里程，必须由前端上报。
+      dist: Math.round(s.dist || 0),
+    });
+    // 采样上限保护：单日最多保留 2 万条
+    if (data.samples.length > 20000) data.samples.splice(0, data.samples.length - 20000);
+    this.markDirty(date);
+    return data.samples.length;
+  }
+
+  /** 记录一次路口 ROLL100 决策 */
+  appendRoll(date, r) {
+    const data = this.load(date);
+    data.rolls.push({
+      t: r.t || Date.now(),
+      lat: Number((r.lat || 0).toFixed(6)),
+      lng: Number((r.lng || 0).toFixed(6)),
+      road: r.road || '',
+      roll: Number(r.roll) || 0,
+      choice: r.choice || '',
+      bearing: Number(r.bearing) || 0,
+    });
+    this.markDirty(date);
+    return data.rolls.length;
+  }
+
+  setCity(date, city) {
+    const data = this.load(date);
+    data.city = city;
+    this.markDirty(date);
+  }
+
+  /** 记录当天走过的城市与地图尺度（用于城市/国家成就） */
+  setContext(date, { city, scope } = {}) {
+    const data = this.load(date);
+    if (city) data.city = city;
+    if (scope) {
+      if (!Array.isArray(data.scopes)) data.scopes = [];
+      if (!data.scopes.includes(scope)) data.scopes.push(scope);
+    }
+    this.markDirty(date);
+  }
+
+  /**
+   * 记录一次出发的起点，返回全局序号（第 N 次出发，跨天累加）
+   * 前端在主地图上为每个出发点画紫色小点 + 序号
+   */
+  addSessionStart(date, lat, lng) {
+    let maxN = 0;
+    for (const d of this.listDates()) {
+      for (const s of (this.load(d).sessions || [])) maxN = Math.max(maxN, s.n || 0);
+    }
+    const data = this.load(date);
+    if (!Array.isArray(data.sessions)) data.sessions = [];
+    const n = maxN + 1;
+    data.sessions.push({ n, lat: Number(Number(lat).toFixed(6)), lng: Number(Number(lng).toFixed(6)), t: Date.now() });
+    this.markDirty(date);
+    return n;
+  }
+
+  /** 全部出发点（按出发顺序），主地图/轨迹回看画紫点用 */
+  allSessionStarts() {
+    const out = [];
+    for (const d of this.listDates().sort()) {
+      for (const s of (this.load(d).sessions || [])) out.push({ date: d, n: s.n, lat: s.lat, lng: s.lng, t: s.t });
+    }
+    return out;
+  }
+
+  /**
+   * 全局聚合指标（用于成就判定与日/月/年统计）
+   * @param {{from?:string,to?:string}} range 日期闭区间，缺省表示全部
+   */
+  aggregate(range = {}) {
+    const dates = this.listDates().filter((d) => {
+      if (range.from && d < range.from) return false;
+      if (range.to && d > range.to) return false;
+      return true;
+    });
+
+    let totalDistance = 0;
+    let maxDayDistance = 0;
+    let totalDuration = 0;
+    let totalKeys = 0;
+    let totalRolls = 0;
+    let totalRx = 0;
+    let totalTx = 0;
+    let totalPoints = 0;
+    let maxSpeed = 0;
+    const roads = new Set();
+    const cities = new Set();
+    const scopes = new Set();
+    const cells = new Set();
+    const perDay = [];
+
+    for (const date of dates) {
+      const d = this.load(date);
+      const path = d.path || [];
+      // 轨迹几何长度：仅作为兜底（地图尺度 != 1 时它等于「地图位移」，不是真实里程）
+      let geomDist = 0;
+      let dayMax = 0;
+      for (let i = 1; i < path.length; i++) geomDist += haversine(path[i - 1], path[i]);
+      for (const p of path) {
+        dayMax = Math.max(dayMax, p.spd || 0);
+        if (p.road) roads.add(p.road.trim());
+        cells.add(cellKey(p.lat, p.lng));
+      }
+      // 里程优先级：结束时的权威汇总 > 采样里上报的累计真实里程 > 轨迹几何长度
+      const statDist = (d.stats && Number.isFinite(d.stats.distance)) ? d.stats.distance : 0;
+      let sampleDist = 0;
+      for (const s of (d.samples || [])) {
+        if (Number.isFinite(s.dist) && s.dist > sampleDist) sampleDist = s.dist;
+      }
+      const dist = statDist > 0 ? statDist : (sampleDist > 0 ? sampleDist : geomDist);
+
+      const t0 = path.length ? path[0].t : d.startedAt;
+      const t1 = path.length ? path[path.length - 1].t : (d.endedAt || d.startedAt);
+      const dur = (d.stats && d.stats.duration) || Math.max(0, (t1 || 0) - (t0 || 0));
+      const dRx = (d.stats && d.stats.rxTotal) || 0;
+      const dTx = (d.stats && d.stats.txTotal) || 0;
+      const dKeys = (d.stats && d.stats.totalKeys) || 0;
+
+      if (d.city) cities.add(d.city);
+      for (const s of (d.scopes || [])) scopes.add(s);
+      if (d.stats && d.stats.scope) scopes.add(d.stats.scope);
+
+      totalDistance += dist;
+      maxDayDistance = Math.max(maxDayDistance, dist);
+      totalDuration += dur;
+      totalKeys += dKeys;
+      totalRolls += (d.rolls || []).length;
+      totalRx += dRx;
+      totalTx += dTx;
+      totalPoints += path.length;
+      maxSpeed = Math.max(maxSpeed, (d.stats && d.stats.maxSpeed) || dayMax);
+      if (path.length || d.stats || (d.samples || []).length) {
+        perDay.push({
+          date,
+          distance: Math.round(dist),
+          duration: dur,
+          keys: dKeys,
+          rolls: (d.rolls || []).length,
+          rx: dRx,
+          tx: dTx,
+          maxSpeed: (d.stats && d.stats.maxSpeed) || dayMax,
+          city: d.city || '',
+          points: path.length,
+        });
+      }
+    }
+
+    return {
+      from: range.from || (dates[0] || ''),
+      to: range.to || (dates[dates.length - 1] || ''),
+      days: dates.length,
+      activeDays: perDay.filter((p) => p.points > 0).length,
+      streakDays: streak(dates),
+      totalDistance: Math.round(totalDistance),
+      maxDayDistance: Math.round(maxDayDistance),
+      totalDuration,
+      totalKeys,
+      totalRolls,
+      totalRx,
+      totalTx,
+      totalPoints,
+      maxSpeed: Number(maxSpeed.toFixed(2)),
+      uniqueRoads: roads.size,
+      litCells: cells.size,
+      cities: [...cities],
+      scopes: [...scopes],
+      roads: [...roads],
+      perDay,
+    };
+  }
+
+  /** 删除某天数据（用于测试/重置） */
+  remove(date) {
+    const f = this.file(date);
+    this.cache.delete(date);
+    this.dirty.delete(date);
+    if (!fs.existsSync(f)) return false;
+    try {
+      fs.unlinkSync(f);
+      return true;
+    } catch (err) {
+      // 某些环境里删除会被重定向到回收站并失败；内存里已经移除，
+      // 这里不抛错，避免调用方（测试/重置流程）被牵连
+      console.error('[store] 删除文件失败（内存数据已移除）：', date, err.message);
+      return false;
+    }
+  }
+
+  /** 整日覆盖（导入存档且本地为空时） */
+  replace(date, data) {
+    this.cache.set(date, data);
+    this.markDirty(date);
+    this.flush();
+    return data;
+  }
+
+  /** 合并导入的某日数据（按时间戳去重，保留双方轨迹） */
+  mergeDate(date, incoming) {
+    if (!incoming) return null;
+    const cur = this.load(date);
+    const dedupe = (a, b) => {
+      const seen = new Set((a || []).map((x) => x.t));
+      for (const x of (b || [])) if (!seen.has(x.t)) a.push(x);
+      a.sort((p, q) => p.t - q.t);
+      return a;
+    };
+    cur.path = dedupe(cur.path || [], incoming.path);
+    cur.rolls = dedupe(cur.rolls || [], incoming.rolls);
+    cur.samples = dedupe(cur.samples || [], incoming.samples);
+    if (incoming.stats) {
+      if (!cur.stats || (incoming.stats.distance || 0) > (cur.stats.distance || 0)) cur.stats = incoming.stats;
+    }
+    if (!cur.city && incoming.city) cur.city = incoming.city;
+    if (Array.isArray(incoming.scopes)) cur.scopes = [...new Set([...(cur.scopes || []), ...incoming.scopes])];
+    if (incoming.endedAt && !cur.endedAt) cur.endedAt = incoming.endedAt;
+    this.markDirty(date);
+    this.flush();
+    return cur;
+  }
+
+  /** 结束当天漫游，写入汇总统计 */
+  finish(date, stats) {
+    const data = this.load(date);
+    data.endedAt = Date.now();
+    data.stats = stats || null;
+    this.markDirty(date);
+    this.flush();
+    return data;
+  }
+
+  isFinished(date) {
+    const data = this.load(date);
+    return Boolean(data.endedAt);
+  }
+
+  listDates() {
+    const dates = fs.readdirSync(this.dir)
+      .filter((f) => f.endsWith('.json'))
+      .map((f) => f.replace('.json', ''));
+    const seen = new Set(dates);
+    // 已产生数据但尚未落盘的当天（写入是每 8 秒批量 flush）也要算进来，
+    // 否则「刚开走就打开数据面板」会漏掉今天
+    for (const [date, data] of this.cache) {
+      if (seen.has(date) || !data) continue;
+      const hasData = Boolean(data.endedAt)
+        || (data.path || []).length > 0
+        || (data.samples || []).length > 0
+        || (data.rolls || []).length > 0
+        || (data.sessions || []).length > 0;
+      if (hasData) { dates.push(date); seen.add(date); }
+    }
+    return dates.sort();
+  }
+
+  get(date) {
+    return this.load(date);
+  }
+
+  /** 抛弃全部内存缓存与脏标记（重置账号数据时用，防止 flush 把删掉的文件写回去） */
+  forgetAll() {
+    this.cache.clear();
+    this.dirty.clear();
+  }
+
+  dispose() {
+    clearInterval(this._flushTimer);
+    this.flush();
+  }
+}
+
+module.exports = { TrackStore, todayStr };

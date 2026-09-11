@@ -1,0 +1,31 @@
+{
+  "_说明": "这是配置模板，不含任何 Key。想改成有效配置时，把本文件复制为同目录下的 config.json（或直接在网页里点右上角地图胶囊填写）。",
+
+  "amapKey": "",
+  "amapSecurityJsCode": "",
+
+  "_amapKey 说明": "高德 Web 端 (JS API) Key。请用你自己的手机号在 https://console.amap.com/dev/id/phone 注册并完成个人实名认证后自行申请；不要填别人的 Key。留空则运行在演练模式（程序生成的虚构路网，玩法完整）。",
+  "_amapSecurityJsCode 说明": "如果控制台启用了「静态安全密钥」，把与 Key 配对的那串也要填上，否则地图不会出图。",
+
+  "provider": "amap",
+  "scope": "city",
+  "city": "深圳",
+
+  "_出发点说明": "originCustom 为 false 时用所选城市的市中心出发；为 true 时用下面 origin 里的坐标，originName 只用于界面展示。",
+  "origin": { "lng": 114.057868, "lat": 22.543099 },
+  "originCustom": false,
+  "originName": "",
+
+  "_调用上限说明": "高德调用（路径规划 + 逆地理）的每日软上限。个人认证开发者日配额为 5000 次，这里默认留出余量；达到上限后引擎会自动退化为直线推进，不影响玩法。",
+  "amapMaxCallsPerDay": 4000,
+
+  "speed": {
+    "netWeight": 0.6,
+    "typeWeight": 0.4,
+    "netFullMbps": 20,
+    "typeFullKpm": 300,
+    "walkMax": 6.5,
+    "runMax": 16,
+    "idleSpeed": 1.2
+  }
+}

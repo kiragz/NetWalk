@@ -1,0 +1,24 @@
+# 依赖
+node_modules/
+
+# 运行数据：轨迹、成就、日报，以及你自己的高德 Key
+# ⚠ 这行很重要：data/config.json 存着你的 API Key，
+#   千万不要提交到代码仓库或打包发给别人
+data/*
+# 但示例配置要留档，方便别人照着填
+!data/config.example.json
+
+# 临时/残留文件
+.tmp_*
+*.log
+
+# 打包产物：exe 体积大且可重新构建
+dist/
+# 打包运行时自动释放的原生模块（uiohook）
+NetWalk-native/
+# 打包运行时生成的数据目录
+NetWalk-data/
+
+# 构建脚本自动生成，可由 `npm run payload` 重新产出
+server/native-payload.js
+server/public-payload.js

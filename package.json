@@ -1,0 +1,46 @@
+{
+  "name": "netwalk",
+  "version": "0.8.1",
+  "private": true,
+  "description": "网速与打字速度驱动的地图漫游挂机小游戏",
+  "type": "commonjs",
+  "main": "server/index.js",
+  "scripts": {
+    "start": "node server/index.js",
+    "dev": "node server/index.js",
+    "selftest": "node server/selftest.js",
+    "smoke": "node server/smoke.js",
+    "uitest": "node test/ui.js",
+    "e2e": "node test/e2e.js",
+    "test": "node server/smoke.js && node test/ui.js && node test/e2e.js",
+    "payload": "node build.js --payload-only",
+    "build": "node build.js",
+    "build:node24": "node build.js --target node24-win-x64"
+  },
+  "pkg": {
+    "assets": [
+      "public/**/*",
+      "server/tray.ps1"
+    ],
+    "targets": [
+      "node22-win-x64"
+    ],
+    "outputPath": "dist"
+  },
+  "dependencies": {
+    "express": "^4.19.2",
+    "systeminformation": "^5.22.11",
+    "uiohook-napi": "^1.5.5",
+    "ws": "^8.18.0"
+  },
+  "devDependencies": {
+    "@yao-pkg/pkg": "^6.6.0",
+    "jsdom": "^24.0.0"
+  },
+  "optionalDependencies": {
+    "node-global-key-listener": "^0.3.1"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}
