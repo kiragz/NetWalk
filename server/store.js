@@ -118,7 +118,8 @@ class TrackStore {
         road: p.road || '',
         spd: Number((p.spd || 0).toFixed(2)),
         mode: p.mode || 'walk',
-        no: Number(p.no) || 0,   // 会话号：绘制时按它切分，多设备合并后不连飞线
+        no: Number(p.no) || 0,        // 会话号：绘制时按它切分，多设备合并后不连飞线
+        straight: p.straight ? 1 : 0, // 直线兜底标记：绘制时剔除这类点，不画飞线
       });
     }
     this.markDirty(date);
@@ -434,6 +435,8 @@ class TrackStore {
         road: String((p && p.road) || ''),
         spd: Number(p && p.spd) || 0,
         mode: (p && p.mode) || 'walk',
+        no: Number(p && p.no) || 0,       // 会话号：整备后也要保留，绘制切分依赖它
+        straight: (p && p.straight) ? 1 : 0,
       });
     }
     if (clean.length < 2) throw new Error('有效轨迹点不足 2 个，已放弃替换');

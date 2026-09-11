@@ -851,12 +851,12 @@
       }).then((r) => r.json());
       if (sj && sj.sessionNo) sessionNo = sj.sessionNo;
     } catch (_) { /* 离线时忽略 */ }
+    // 先画历史轨迹（setTrack 会清掉旧的出发点标记），再补本次出发的紫点，顺序不能反
+    drawHistoryOnMap(origin);
     if (sessionNo && state.provider && state.provider.addStartMarker) {
       state.provider.addStartMarker(origin.lat, origin.lng, sessionNo);
       log(`第 ${sessionNo} 次出发（地图上已用紫点标出）`);
     }
-    // 主地图先画上历史轨迹（走过的所有路，按速度渐变色），再画全部出发点（紫点 + 序号）
-    drawHistoryOnMap(origin);
     state.engine = engine;
     engine.sessionNo = sessionNo;
     engine.start();
@@ -879,6 +879,13 @@
     let cur = [];
     let si = 0;
     for (const p of points) {
+      // 直线兜底的点不画（用户要求去掉飞线）：直接断开并跳过该点。
+      // 这类段的缺口可以随时用「🧭 轨迹整备」重新沿真实道路补上。
+      if (p.straight) {
+        if (cur.length > 1) segs.push(cur);
+        cur = [];
+        continue;
+      }
       while (si < st.length && st[si] <= (p.t || 0)) {
         si++;
         if (cur.length > 1) segs.push(cur);
@@ -961,11 +968,14 @@
     const durSec = Math.max(1, (t1 - t0) / 1000);
     const spd = Math.round(((total / durSec) * 3.6) * 10) / 10;
     const mode = ch[0].mode || 'walk';
+    const no = Number(ch[0].no) || 0;   // 整备后的点沿用原会话号（绘制切分依赖它）
     return pts.map((p, i) => ({
       t: Math.round(t0 + (cum[i] / total) * (t1 - t0)),
       lat: p.lat, lng: p.lng,
       road: roadAt(cum[i]) || (ch[0].road || ''),
       spd, mode,
+      no,
+      straight: 0,   // 整备后的点都贴路，不再是直线兜底
     }));
   }
 

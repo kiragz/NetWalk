@@ -150,15 +150,24 @@
         return 2 * 6371000 * Math.asin(Math.min(1, Math.sqrt(h)));
       };
       const chunks = [];
-      let cur = [track[0]];
-      for (let i = 1; i < track.length; i++) {
-        const a = track[i - 1], b = track[i];
-        const noA = Number(a.no) || 0, noB = Number(b.no) || 0;
-        if (distM(a, b) > 250 || ((b.t || 0) - (a.t || 0)) > 15 * 60000 || (noA && noB && noA !== noB)) {
-          chunks.push(cur); cur = [b];
-        } else cur.push(b);
+      let cur = [];
+      for (const p of track) {
+        if (p.straight) { // 直线兜底的点不画（与主地图同规则）
+          if (cur.length > 1) chunks.push(cur);
+          cur = [];
+          continue;
+        }
+        if (cur.length) {
+          const a = cur[cur.length - 1];
+          const noA = Number(a.no) || 0, noB = Number(p.no) || 0;
+          if (distM(a, p) > 250 || ((p.t || 0) - (a.t || 0)) > 15 * 60000 || (noA && noB && noA !== noB)) {
+            if (cur.length > 1) chunks.push(cur);
+            cur = [];
+          }
+        }
+        cur.push(p);
       }
-      chunks.push(cur);
+      if (cur.length > 1) chunks.push(cur);
       for (const chunk of chunks) {
         for (let i = 1; i < chunk.length; i++) {
           const a = proj(chunk[i - 1]);

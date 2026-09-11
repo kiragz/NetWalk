@@ -210,13 +210,17 @@
       if (this._lastPoint) {
         const d = haversine(this._lastPoint, this.pos);
         if (d >= MIN_POINT_GAP) {
+          const onStraight = Boolean(this.route && this.route.straight);
           this._pending.push({
             t: Date.now(), lat: this.pos.lat, lng: this.pos.lng,
             road: this.road, spd: this.speedKmh, mode: this.mode,
             no: this.sessionNo || 0,   // 会话号：多设备合并后绘制按它切分，杜绝跨设备飞线
+            straight: onStraight ? 1 : 0,   // 直线兜底标记：绘制时剔除，不画飞线
           });
-          this._lastPoint = Object.assign({}, this.pos);
+          // 顺序不能反：先用旧的 _lastPoint 画「上一点 → 当前点」，再更新 _lastPoint
+          // （以前先更新再传参，画出来是零长度线段，行走中的轨迹根本不会实时生长）
           this.provider.addTrackPoint(this.pos.lat, this.pos.lng, this._lastPoint, this.speedKmh);
+          this._lastPoint = Object.assign({}, this.pos);
         }
       }
       if (now - this._lastFlush > FLUSH_EVERY) this.flush();
@@ -308,10 +312,13 @@
       });
     }
 
-    /** 直线兜底路线：任何情况下都保证有路可走，绝不停在原地 */
+    /** 直线兜底路线：任何情况下都保证有路可走，绝不停在原地。
+     *  straight=true 标记：这段点绘制时会被剔除（用户要求"去掉错误的直线飞线"），
+     *  且 🧭 轨迹整备会优先把这类段重新规划成真实道路。 */
     _straightRoute(bearing, distance) {
       const end = destPoint(this.pos, bearing, distance);
       return {
+        straight: true,
         points: [Object.assign({}, this.pos), end],
         steps: [{ road: this.road || '', distance }],
         distance,
