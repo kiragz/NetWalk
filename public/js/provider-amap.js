@@ -127,22 +127,15 @@
       this.geocoder = new AMap.Geocoder({ radius: 200 });
       this.walking = new AMap.Walking({ autoFitView: false });
 
-      // 主地图轨迹按速度分色（与轨迹弹窗/日报同一套 4 档配色）：
-      // 每个速度档一条 Polyline，段与段交界处用重叠端点补缝
-      // 10 档离散渐变（浅黄 → 深红），视觉上足够平滑
+      // 主地图轨迹按速度分色（与轨迹弹窗/日报同一套配色）：
+      // ⚠ 不能用"每个速度档一条累计 Polyline"——同档 Polyline 会把它持有的所有点
+      // 按顺序连起来，两段不相邻的轨迹（换设备/换会话/跳变）就会被一条直线连上，
+      // 这就是"直线飞线"的真正来源（数据再干净也拦不住，因为它发生在绘制层）。
+      // 现改为"笔迹"模型：连续的同色相邻点共用一条 Polyline（一条 run），
+      // 遇到断笔（换会话/跳变/断档/直线剔除）就换新 Polyline，段与段之间绝不相连。
       this._speedColors = speedGradientPalette();
-      this._speedLines = this._speedColors.map((c) => {
-        const line = new AMap.Polyline({
-          path: [],
-          strokeColor: c,
-          strokeWeight: 4,
-          strokeOpacity: 0.9,
-          lineJoin: 'round',
-          lineCap: 'round',
-        });
-        this.map.add(line);
-        return line;
-      });
+      this._runs = [];       // 所有已创建的笔迹（清空轨迹时统一移除）
+      this._curRun = {};     // 速度档 → 当前笔迹
       this._trackPts = [];
 
       this._avatarEl = buildAvatar();
@@ -198,11 +191,27 @@
       const cur = new this.AMap.LngLat(lng, lat);
       const li = this.speedColorIndex(spd);
       if (prev) {
-        // 每段按速度独立上色：段 = [上一点, 当前点]，交界处两点重叠补缝
+        // 每段按速度独立上色：段 = [上一点, 当前点]，交界处两点重叠补缝。
+        // 线段写进「当前笔迹」——同一笔迹内的相邻点才相连；
+        // 断笔后（setTrack append / 新会话）会换新笔迹，绝不与上一段相连。
         const plo = this.speedColorIndex(this._lastSpd != null ? this._lastSpd : spd);
         const seg = [new this.AMap.LngLat(prev.lng, prev.lat), cur];
         for (let k = Math.min(plo, li); k <= Math.max(plo, li); k++) {
-          this._speedLines[k].setPath(this._speedLines[k].getPath().concat(seg));
+          let line = this._curRun[k];
+          if (!line) {
+            line = new this.AMap.Polyline({
+              path: [],
+              strokeColor: this._speedColors[k],
+              strokeWeight: 4,
+              strokeOpacity: 0.9,
+              lineJoin: 'round',
+              lineCap: 'round',
+            });
+            this.map.add(line);
+            this._runs.push(line);
+            this._curRun[k] = line;
+          }
+          line.setPath(line.getPath().concat(seg));
         }
       }
       this._lastSpd = spd;
@@ -214,10 +223,15 @@
       if (!this._ready) return;
       if (!append) {
         this.clearStartMarkers();
-        // 历史轨迹恢复：逐段按各自的速度上色
-        this._speedLines.forEach((l) => l.setPath([]));
+        // 清空轨迹：移除全部笔迹
+        this._runs.forEach((l) => { try { this.map.remove(l); } catch (_) { /* noop */ } });
+        this._runs = [];
         this._trackPts = [];
         this._lastSpd = null;
+      } else {
+        // 追加新的一段：先"断笔"——关闭当前所有笔迹，
+        // 下一段从新 Polyline 开始，绝不从上一段的末点连一条直线过来（飞线根源）
+        this._curRun = {};
       }
       for (let i = 1; i < points.length; i++) {
         this.addTrackPoint(points[i].lat, points[i].lng, points[i - 1], points[i].spd);
@@ -396,7 +410,7 @@
 
     fit() {
       if (!this._ready || !this._trackPts.length) return;
-      this.map.setFitView(this._speedLines, false, [60, 60, 60, 60], 17);
+      this.map.setFitView(this._runs, false, [60, 60, 60, 60], 17);
     }
 
     /** 每次出发点：紫色小点 + 序号数字（第 N 次出发） */

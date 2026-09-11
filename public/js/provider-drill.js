@@ -272,16 +272,18 @@
       this._startNodes = [];
     }
 
-    setTrack(points) {
-      this.clearStartMarkers();
-      this._trackCount = 0;
-      for (let k = 0; k < 10; k++) {
-        const el = this.svg.querySelector('#dTrack' + k);
-        if (el) el.setAttribute('d', '');
+    setTrack(points, { append = false } = {}) {
+      if (!append) {
+        this.clearStartMarkers();
+        this._trackCount = 0;
+        for (let k = 0; k < 10; k++) {
+          const el = this.svg.querySelector('#dTrack' + k);
+          if (el) el.setAttribute('d', '');
+        }
+        this._lastSpd = null;
+        if (this.trackEl) this.trackEl.setAttribute('d', '');
       }
-      this._lastSpd = null;
-      if (this.trackEl) this.trackEl.setAttribute('d', '');
-      // 历史轨迹恢复：逐段按各自的速度上色
+      // append=true：追加新的一段（不断笔也绝不与上一段相连 —— 每对点都是独立的 M+L 子路径）
       for (let i = 1; i < (points || []).length; i++) {
         this.addTrackPoint(points[i].lat, points[i].lng, points[i - 1], points[i].spd);
       }

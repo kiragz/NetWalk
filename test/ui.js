@@ -450,7 +450,8 @@ const shown = (id) => $(id).classList.contains('show');
     && amapSt.pluginCalls[0].includes('AMap.Geocoder'),
     JSON.stringify(amapSt.pluginCalls));
   ok('地图已创建且用暗色样式', !!amapSt.map && amapSt.map.opts.mapStyle === 'amap://styles/dark');
-  ok('10 档渐变 Polyline + Marker 已挂到地图', amapSt.map.added.length === 11, 'n=' + amapSt.map.added.length);
+  // 0.9.13 笔迹模型：Polyline 按需创建（连续同色段一条线），初始只有 Marker
+  ok('初始不预建 Polyline（笔迹按需创建）+ Marker 已挂到地图', amapSt.map.added.length === 1, 'n=' + amapSt.map.added.length);
   ok('Marker content 是真实 DOM 元素', !!amapSt.marker.content
     && typeof amapSt.marker.content.querySelector === 'function',
     typeof amapSt.marker.content);
@@ -469,8 +470,21 @@ const shown = (id) => $(id).classList.contains('show');
 
   ap.addTrackPoint(22.55, 114.07, null, 2);          // 慢速 → 浅黄档（档 1）
   ap.addTrackPoint(22.56, 114.08, { lat: 22.55, lng: 114.07 }, 8);   // 快速 → 深色档（档 5）
-  ok('轨迹按速度写入对应渐变档 polyline', amapSt.speedLines[1].path.length === 2
-    && amapSt.speedLines[5].path.length === 2, JSON.stringify(amapSt.speedLines.map((l) => l.path.length)));
+  // 0.9.13 笔迹模型：跨档补缝会为档 1..5 各建一条笔迹，每条存 [prev, cur]
+  ok('轨迹按速度写入对应渐变档（跨档补缝各建一条笔迹）',
+    amapSt.speedLines.length === 5 && amapSt.speedLines.every((l) => l.path.length === 2),
+    'runs=' + amapSt.speedLines.length + ' paths=' + JSON.stringify(amapSt.speedLines.map((l) => l.path.length)));
+
+  // 飞线回归（核心！）：两段不相邻、同速度档的轨迹，绝不能被同一条 Polyline 连起来
+  const segA = [{ lat: 1, lng: 1, spd: 5 }, { lat: 1.001, lng: 1.001, spd: 5 }];
+  const segB = [{ lat: 2, lng: 2, spd: 5 }, { lat: 2.001, lng: 2.001, spd: 5 }];
+  const runsBefore = amapSt.speedLines.length;
+  ap.setTrack(segA);
+  ap.setTrack(segB, { append: true });
+  const newRuns = amapSt.speedLines.slice(runsBefore);
+  ok('断笔后新段用新 Polyline（飞线回归：不再从上一段末点直连）',
+    newRuns.length === 1 && newRuns[0].path.length === 2 && newRuns[0].path[0].lng === 2,
+    JSON.stringify(newRuns.map((l) => l.path.length)));
 
   ap.lightCell(22.55, 114.07);
   ap.lightCell(22.56, 114.08);
