@@ -738,13 +738,15 @@
   /**
    * 完整的一键同步：恢复配置（高德 Key / 邮箱 / 出发点）+ 拉回最新存档。
    * 登录后 / 「一键同步」按钮共用。返回摘要供 UI 展示。
+   * skipData=true 时只恢复配置，不拉旧存档 —— 本机重置过、不想被旧轨迹污染时用。
    */
-  async function syncFromMailbox() {
-    const res = { ok: false, restored: '', pulled: '', keyRestored: false, days: 0 };
+  async function syncFromMailbox({ skipData = false } = {}) {
+    const res = { ok: false, restored: '', pulled: '', keyRestored: false, days: 0, skipped: skipData };
     const rc = await fetch('/api/mailbox/restore-config', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
     }).then((x) => x.json()).catch(() => null);
     if (rc && rc.ok) res.restored = '配置 ' + (rc.restored || []).length + ' 项';
+    if (skipData) return res;
     const mp = await fetch('/api/mailbox/pull', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
     }).then((x) => x.json()).catch(() => null);
@@ -868,17 +870,34 @@
       const flat = days.flatMap((d) => d.path || []);
       if (flat.length < 2) { log('地图上还没有历史轨迹，本次行走将开始画线'); }
       else {
-        // 按间断切开再画：跨会话/跨天的"瞬移"（空间跳变 >250m 或时间断档 >15 分钟）
-        // 不该被连成一条横穿城市的直线 —— 那是"路径画乱"的主要来源之一
+        // 分段规则（三类，命中任一即断开）：
+        // ① 跨会话：每个「出发」之后必然是新的一段 —— 两台设备交替走时，
+        //    同一天的合并数据按时间排序会在两台设备的位置之间来回跳，
+        //    不按会话切开就会画出横穿街区的"直线飞线"
+        // ② 空间断：相邻点跳变 >250m（瞬移 / 直线兜底留下的跨块直线）
+        // ③ 时间断档：>15 分钟（中间没走，连起来也是假线）
+        const starts = ((r && r.starts) || []).map((s) => Number(s.t)).filter(Boolean).sort((a, b) => a - b);
         const segs = [];
-        let cur = [flat[0]];
-        for (let i = 1; i < flat.length; i++) {
-          const m = haversineKm(flat[i - 1], flat[i]);
-          const dt = (flat[i].t || 0) - (flat[i - 1].t || 0);
-          if (m > 250 || dt > 15 * 60000) { segs.push(cur); cur = [flat[i]]; }
-          else cur.push(flat[i]);
+        let cur = [];
+        let si = 0;
+        for (const p of flat) {
+          while (si < starts.length && starts[si] <= (p.t || 0)) {
+            si++;
+            if (cur.length > 1) segs.push(cur);
+            cur = [];
+          }
+          if (cur.length) {
+            const prev = cur[cur.length - 1];
+            const m = haversineKm(prev, p);
+            const dt = (p.t || 0) - (prev.t || 0);
+            if (m > 250 || dt > 15 * 60000) {
+              if (cur.length > 1) segs.push(cur);
+              cur = [];
+            }
+          }
+          cur.push(p);
         }
-        if (cur.length) segs.push(cur);
+        if (cur.length > 1) segs.push(cur);
         segs.forEach((seg, idx) => {
           if (seg.length < 2) return;
           state.provider.setTrack(seg, { append: idx > 0 });
@@ -1759,9 +1778,24 @@
       return s || '未知错误';
     }
         // 一键同步：恢复邮箱里保存的配置 + 拉回最新存档码（登录账号 / 换设备时用）
+    let syncConfirmArmed = false, syncConfirmTimer = null;
     el.btnSync.addEventListener('click', async () => {
       const btn = el.btnSync;
       const old = btn.innerHTML;
+      // 本机重置过数据 → 同步前必须二次确认：
+      // 邮箱里的存档来自另一台未重置的设备，直接合并会把旧轨迹混进重置后的新线路
+      if (!syncConfirmArmed && localStorage.getItem('netwalkNoAutoSync') === '1') {
+        syncConfirmArmed = true;
+        btn.textContent = '确认合并旧数据？';
+        log('⚠ 你在本机重置过数据。现在同步会把邮箱里的旧存档（另一台设备的全部历史轨迹）合并回来，重置后的新线路会被旧轨迹污染。');
+        log('　· 只想恢复配置（高德 Key / 邮箱 / 出发点）→ ⚙ 设置 → 📮 邮件服务 → 「📥 从邮箱恢复配置」');
+        log('　· 确定要把旧数据合并回来 → 再点一次「同步」');
+        clearTimeout(syncConfirmTimer);
+        syncConfirmTimer = setTimeout(() => { syncConfirmArmed = false; btn.innerHTML = old; }, 12000);
+        return;
+      }
+      syncConfirmArmed = false;
+      clearTimeout(syncConfirmTimer);
       btn.disabled = true; btn.textContent = '同步中…';
       // 用户主动点同步 = 明确要把邮箱数据取回来，解除"重置后暂停自动同步"
       try { localStorage.removeItem('netwalkNoAutoSync'); } catch (_) { /* noop */ }
@@ -2046,6 +2080,15 @@ el.btnReport.addEventListener('click', () => {
           : `已登录档案「${j.account.name}」，正在从邮箱同步数据…`);
         // 重启完成（确认新 pid）后立刻一键同步：配置 + 该邮箱账号的存档
         restartForAccount(async () => {
+          // 本机重置过数据 → 登录后只恢复配置，不拉旧存档（避免旧轨迹污染重置后的新线路）
+          if (localStorage.getItem('netwalkNoAutoSync') === '1') {
+            el.accCodeHint.textContent = '正在恢复配置（本机重置过，不同步旧数据）…';
+            const rc = await syncFromMailbox({ skipData: true });
+            el.accCodeHint.textContent = '配置已恢复（' + (rc.restored || '0 项') + '）。'
+              + '本机重置过数据，未合并旧存档 —— 这样新线路是干净的。需要旧数据时点「同步」并确认。';
+            log('🔄 登录后同步：只恢复了配置，未拉取旧存档（本机重置过，避免污染新线路）。');
+            return;
+          }
           el.accCodeHint.textContent = '正在从邮箱同步数据与配置…';
           const r = await syncFromMailbox();
           if (r.keyRestored) {
