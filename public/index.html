@@ -13,7 +13,7 @@
   <header class="topbar" data-page-node-id="ddrJhtR5e5RhxcM4HEN3M4">
     <div class="brand" data-page-node-id="8DH2ofHV66qbHEOc2uAOXh">Net<span data-page-node-id="Gt7m3YCBqixEngqyYKio6f">Walk</span></div>
     <button class="ver-pill" id="btnAccount" title="账号与档案">👤 未登录</button>
-    <button class="ver-pill" id="btnVersion" title="查看版本更新概要">v0.8.1</button>
+    <button class="ver-pill" id="btnVersion" title="查看版本更新概要">v0.9.6</button>
     <div class="pill" id="pillMap" data-page-node-id="GjTS25Bi1mrlBafIXfCBl3">地图加载中</div>
     <div class="pill" id="pillNet" data-page-node-id="Snjd11zKSBJFXSszeLhDMN">网络采集中</div>
     <div class="pill" id="pillKey" data-page-node-id="h2AOMKNxwH67HjkAsxSCgU">击键采集中</div>
@@ -125,7 +125,11 @@
     <div class="field" data-page-node-id="EySCZgMA1i7YvTJWjVD4Ht">
       <label data-page-node-id="j8OXpOaGHzAX37w80E1ATC">高德安全密钥（控制台要求时填写） <span class="tag-opt" data-page-node-id="ovEXRlAWIWyef7sIpeMKsJ">可选</span></label>
       <input type="text" id="cfgSec" placeholder="启用静态安全密钥的 Key 必填" autocomplete="off" data-page-node-id="72xrQsElfWItuGM3oqUYwF"/>
-      <div class="hint" data-page-node-id="QqemceEIWlMuiYKc2eXhgK">与 Key 一起在控制台生成，同样只保存在本机。</div>
+      <div class="btn-row" style="margin-top:6px">
+        <button class="btn sm" id="btnSecClear" title="地址解析一直超时时可试着清除：若你的 Key 没开「静态安全密钥」，填了反而会导致请求被拒">清除安全密钥（排查超时用）</button>
+        <span class="hint" id="secHint" style="flex:1;margin:0"></span>
+      </div>
+      <div class="hint" data-page-node-id="QqemceEIWlMuiYKc2eXhgK">在高德控制台与 Key <b>一起生成、但值不同</b>（不要填成 Key 本身，否则地址解析会一直超时）。留空保持不变；<b>地址解析超时</b>时可点上面「清除安全密钥」试一次——若你的 Key 没开「静态安全密钥」，填了反而会被拒。</div>
     </div>
 
     <div class="notice warn" data-page-node-id="XgR2CwqSbKXtipLQePqzA5">
@@ -134,8 +138,8 @@
       对方打开设置用<b data-page-node-id="vEJxWrCGHHgwhjxvkMjh9F">自己的手机号</b>申请 Key，或者什么都不填直接玩演练模式。
     </div>
 
-    <div class="field" data-page-node-id="mM5GlOFCeDx5Bg5Zro6ynX">
-      <label data-page-node-id="5eLrzDeR5DvPC7Q063LqHg">出发点<span id="originLockHint" style="display:none;color:#ffb020;font-weight:400"> · 已注册：修改出发点需走下方「重置」</span></label>
+    <div class="field" id="originField" data-page-node-id="mM5GlOFCeDx5Bg5Zro6ynX">
+      <label data-page-node-id="5eLrzDeR5DvPC7Q063LqHg">出发点<span id="originLockHint" style="display:none;color:#8b98b5;font-weight:400"> · 改完点下方「保存并重启漫游」即从新位置出发</span></label>
       <div class="origin-cur" data-page-node-id="ekNIwvVkW9JzqRNCEnhGL1">
         <span class="oc-name" id="orCurName" data-page-node-id="rQuZ3QhB8JAnDWAqhLGv0L">城市中心</span>
         <span class="oc-coord" id="orCurCoord" data-page-node-id="YA4AWtLFBfjY5fthisPBPN">—</span>
@@ -227,12 +231,25 @@
             <button class="btn sm" id="btnMailRestore" title="换新设备时点这个：自动从邮箱取回高德 Key、安全密钥、SMTP/IMAP 授权码">📥 从邮箱恢复配置</button>
             <span class="hint" id="mailHint"></span>
           </div>
-          <div class="hint">QQ 邮箱：设置 → 账户 → 开启 SMTP → 生成授权码。163 邮箱同理。</div>
+          <div class="hint">QQ 邮箱：设置 → 账户 → 开启 SMTP/IMAP → 生成授权码。SMTP 端口填 <b>465</b>（SSL）或 587；IMAP 端口 993。163 邮箱同理。</div>
           <div class="or-line" style="margin-top:8px">
             <input type="text" id="mailImapHost" placeholder="IMAP 服务器，如 imap.qq.com（出发时自动从邮箱续存档用）" autocomplete="off" style="flex:2"/>
             <input type="text" id="mailImapPort" placeholder="993" autocomplete="off" style="flex:1"/>
           </div>
           <div class="hint">配好 IMAP 后：每次点「出发」都会自动从邮箱取回最新存档并从上次结束点继续；高德 Key 和安全密钥也会随存档码发到邮箱，换设备一键恢复。</div>
+          <div class="or-line" style="margin-top:10px;align-items:center">
+            <label class="hint" style="flex:1;margin:0;cursor:pointer">
+              <input type="checkbox" id="autoMailArchive" style="vertical-align:-2px;margin-right:4px"/>
+              结束漫游后自动把存档发到邮箱（想少收邮件就取消勾选，需要时手动「⬆ 上传存档」即可）
+            </label>
+          </div>
+          <div class="or-line" style="margin-top:10px;align-items:center">
+            <span class="hint" id="mailBoxStatus" style="flex:1;margin:0">邮箱存档状态：未检查</span>
+            <button class="btn sm" id="btnMailStatus" title="检查邮箱里有没有 NetWalk 存档邮件">检查邮箱</button>
+            <button class="btn sm" id="btnMailPush" title="把当前存档码立刻发到你邮箱，换设备时就能续档">⬆ 上传存档</button>
+            <button class="btn sm" id="btnMailClean" title="只保留最新一封 NetWalk 存档邮件，其余删除（同步只需要最新那封）。不影响收件箱里的其他邮件">🧹 清理旧邮件</button>
+          </div>
+          <div class="hint">担心收件箱被塞满：① 取消勾选上面的自动发送，改成想备份时手动「⬆ 上传存档」；② 隔段时间点一次「🧹 清理旧邮件」（只删 NetWalk 邮件，且永远保留最新一封）；③ 也可以专门注册一个邮箱来玩，在设置里换账号和授权码即可。</div>
         </div>
       </details>
 
@@ -262,7 +279,9 @@
       <textarea id="doneArc" class="code-area" readonly placeholder="生成中…"></textarea>
       <div class="btn-row" data-page-node-id="UwepYK7pHwLcK2TFgWs6bF">
         <button class="btn" id="btnDoneArcCopy" data-page-node-id="dMrcuWGqTEUHQe6bk3tS0S">📋 复制存档码</button>
+        <button class="btn" id="btnDoneMail" title="把存档码发到你配置的邮箱，换设备可一键续档">📧 发送到邮箱</button>
       </div>
+      <div class="hint" id="doneHint" style="min-height:16px"></div>
     </div>
     <div class="modal-acts" data-page-node-id="arsNlqig33x5S6gbPNKq3N">
       <button class="btn primary" id="btnOpenReport" data-page-node-id="AvZeJHp5PJUXrdQcoABhFc">打开今日日报</button>
@@ -402,15 +421,16 @@
         <input id="rgCode" maxlength="6" placeholder="6 位数字" style="flex:1" />
         <button class="btn" id="btnRgSend">发送验证码</button>
       </div>
-      <div class="hint" id="rgHint">单机版暂未接入邮件服务：验证码会直接显示在这里（将来接入邮箱后改为真实发送）。</div>
+      <div class="hint" id="rgHint">配置了邮件服务就会把验证码发到你邮箱；没配置则直接显示在这里（仅本机可见）。</div>
     </div>
     <div class="field">
-      <label>出发点（只在此刻设定一次）</label>
+      <label>出发点</label>
       <select id="rgCity"></select>
-      <div class="hint">想改出发点只能重置全部数据（有二次确认），所以想好从哪里出发。</div>
+      <div class="hint">先选城市中心即可；之后想精确到某个地点（搜索 / 地图点选 / 当前定位），在「设置 → 出发点」里改。</div>
     </div>
     <div class="modal-acts">
       <button class="btn primary" id="btnRgDone">完成注册</button>
+      <button class="btn" id="btnRgLogin" title="换设备 / 已有档案：用邮箱验证码登录，再从邮箱同步旧数据">我已有档案，去登录</button>
       <button class="btn" id="btnRgSkip">稍后再说</button>
     </div>
   </div>
@@ -423,8 +443,9 @@
     <div class="desc">此操作将<b>永久删除</b>你的全部漫游轨迹、成就、统计与存档码，<b>不可恢复</b>。
       出发点将改为你在下面选择的新位置，分身从新起点重新开始。</div>
     <div class="field">
-      <label>新的出发点（城市）</label>
+      <label>新的出发点（先选城市）</label>
       <select id="rsCity"></select>
+      <div class="hint">重置完成后，可到「设置 → 出发点」用<b>地址搜索 / 地图点选 / 当前定位</b>精确指定具体位置，再点「保存并重启漫游」。</div>
     </div>
     <div class="field">
       <label>请一字不差输入下面这句话，以确认你知晓后果</label>
@@ -458,7 +479,7 @@
     <div class="field" data-page-node-id="SJuWRnVpAOxDhst3j2JB9p">
       <label data-page-node-id="aq4eZUdPYsi0QlDMRuEFbW">我的存档码</label>
       <textarea id="arCode" class="code-area" readonly placeholder="点击下方按钮生成"></textarea>
-      <div class="hint" id="arHint" data-page-node-id="N3FH69oGo1ZAf55i9V40k2">存档码只包含漫游数据，不含任何账号信息，可直接分享或备份。</div>
+      <div class="hint" id="arHint" data-page-node-id="N3FH69oGo1ZAf55i9V40k2">存档码包含漫游数据与成就；新版还会带上本机的高德 Key / 邮箱配置（换机时可一并恢复，导入时由你决定是否应用）。</div>
     </div>
     <div class="btn-row" data-page-node-id="A8eoJozdbZFXWtE8Gw4E1X">
       <button class="btn" id="btnArGen" data-page-node-id="f79jM0ATWzj9p5x9CYpFLA">生成存档码</button>
@@ -471,6 +492,7 @@
     </div>
     <div class="modal-acts" data-page-node-id="lprQJ9oD9QPbzxtVgulZqE">
       <button class="btn primary" id="btnArImport" data-page-node-id="pCmWtlfe5Gy0dgUrObaa3R">导入并合并</button>
+      <button class="btn" id="btnArApplyCfg" style="display:none" title="把存档码里携带的高德 Key / 邮箱配置恢复到本机（换设备时免手填）">恢复本机配置</button>
       <button class="btn" id="btnArClose" data-page-node-id="9n8fHyGF2CH4wg9ZKhUT9f">关闭</button>
     </div>
   </div>

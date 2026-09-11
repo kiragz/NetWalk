@@ -11,6 +11,12 @@ data/*
 # 临时/残留文件
 .tmp_*
 *.log
+*.out
+x.txt
+zz.txt
+.workbuddy/
+.DS_Store
+Thumbs.db
 
 # 打包产物：exe 体积大且可重新构建
 dist/

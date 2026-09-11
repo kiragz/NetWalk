@@ -57,6 +57,7 @@
     rowAmap: $('rowAmap'), mAmap: $('mAmap'),
     doneStats: $('doneStats'), btnOpenReport: $('btnOpenReport'), btnRestart: $('btnRestart'),
     doneArc: $('doneArc'), btnDoneArcCopy: $('btnDoneArcCopy'),
+    btnDoneMail: $('btnDoneMail'), doneHint: $('doneHint'),
     btnOvClose: $('btnOvClose'),
     // 功能栏
     btnAch: $('btnAch'), btnStats: $('btnStats'), btnArchive: $('btnArchive'),
@@ -68,6 +69,7 @@
     statsDaily: $('statsDaily'), btnStatsClose: $('btnStatsClose'),
     maskArchive: $('maskArchive'), arCode: $('arCode'), arInput: $('arInput'), arHint: $('arHint'),
     btnArGen: $('btnArGen'), btnArCopy: $('btnArCopy'), btnArImport: $('btnArImport'), btnArClose: $('btnArClose'),
+    btnArApplyCfg: $('btnArApplyCfg'),
     maskShare: $('maskShare'), shareCanvas: $('shareCanvas'),
     btnShareSave: $('btnShareSave'), btnShareCopy: $('btnShareCopy'), btnShareClose: $('btnShareClose'),
     // 版本号与更新概要
@@ -93,6 +95,11 @@
     // 邮件服务配置（存档码自动发邮箱）
     mailHost: $('mailHost'), mailPort: $('mailPort'), mailUser: $('mailUser'),
     mailPass: $('mailPass'), btnMailSave: $('btnMailSave'), mailHint: $('mailHint'),
+    mailImapHost: $('mailImapHost'), mailImapPort: $('mailImapPort'),
+    mailBoxStatus: $('mailBoxStatus'), btnMailStatus: $('btnMailStatus'), btnMailPush: $('btnMailPush'),
+    autoMailArchive: $('autoMailArchive'), btnMailClean: $('btnMailClean'),
+    btnRgLogin: $('btnRgLogin'),
+    btnSecClear: $('btnSecClear'), secHint: $('secHint'),
     mVisited: $('mVisited'), mLit: $('mLit'),
   };
 
@@ -106,6 +113,13 @@
     keyMode: 'none',
     channel: ('BroadcastChannel' in window) ? new BroadcastChannel('netwalk') : null,
     reportUrl: '',
+    reportDate: '',
+    reportError: '',
+    // 已保存的高德 Key / 安全密钥（输入框留空 = 保持不变，避免"看到空框就重填、填错"）
+    savedKey: '',
+    savedSec: '',
+    pid: null,          // 当前服务进程号：重启后换 pid，用于判断"真的重启完成"
+    lastImportedCode: '',   // 最近导入的存档码（用于一键恢复其中携带的本机配置）
     ach: null,
     achFilter: 'all',
     statsRange: 'day',
@@ -192,6 +206,7 @@
       const r = await fetch('/api/account');
       const j = await r.json();
       state.account = j.current || null;
+      if (j.pid) state.pid = j.pid;
       el.btnAccount.textContent = state.account ? `👤 ${state.account.name}` : '👤 未登录';
       return j;
     } catch (_) {
@@ -212,11 +227,11 @@
     }
   }
 
-  async function openAccount() {
-    el.maskAccount.classList.add('show');
-    const j = await refreshAccount();
-    renderAccount(j);
-    // 回填邮件服务配置（密码只回显是否已配置）
+  /**
+   * 回填邮件服务表单：SMTP 主机 / 端口 / 账号 / 授权码（只回显是否已配置）/ IMAP。
+   * 每次打开设置都必须调用 —— 否则用户看到空白输入框，以为"没保存"，只好反复重填。
+   */
+  async function loadMailForm() {
     try {
       const cfg = await fetch('/api/config').then((r) => r.json());
       el.mailHost.value = cfg.mailSmtpHost || '';
@@ -224,23 +239,119 @@
       el.mailUser.value = cfg.mailUser || '';
       el.mailPass.value = '';
       el.mailPass.placeholder = cfg.mailPass === '***configured***' ? '已配置（填新值可覆盖）' : '授权码';
-      el.mailHint.textContent = cfg.mailConfigured ? '已配置 ✓ 注册/登录时会自动发存档码到邮箱' : '';
+      if (el.mailImapHost) el.mailImapHost.value = cfg.mailImapHost || '';
+      if (el.mailImapPort) el.mailImapPort.value = cfg.mailImapPort || '';
+      if (el.autoMailArchive) el.autoMailArchive.checked = cfg.autoMailArchive !== false;
+      el.mailHint.textContent = cfg.mailConfigured
+        ? '已配置 ✓ 结束漫游 / 点「上传存档」时会把存档码发到邮箱'
+        : '';
     } catch (_) { /* noop */ }
   }
 
-  /** 账号变更后需要重启服务才能切到新数据目录 */
-  function restartForAccount() {
+  /**
+   * 把 "Failed to fetch" 这类网络层报错翻译成人话。
+   * 切换账号 / 登录会触发服务重启，重启窗口内的请求必然失败；
+   * 直接把英文原样丢给用户，只会让人以为"登录系统坏了"。
+   */
+  function netErr(e) {
+    const m = String((e && e.message) ? e.message : e);
+    if (/Failed to fetch|NetworkError|ERR_CONNECTION_REFUSED/i.test(m)) {
+      return '与本机服务失去连接（通常是切换账号 / 登录后正在重启）。请等 3~5 秒后刷新页面；若一直如此，关掉 NetWalk 重开。';
+    }
+    return m;
+  }
+
+  /**
+   * 回填高德 Key / 安全密钥：只提示"已配置"，输入框留空即保持不变。
+   * 跟邮箱配置一个道理 —— 不回填的话用户看到空框会以为没保存，把 Key 粘进安全密钥框，
+   * 结果安全密钥 == Key，高德签名失败，地图正常但地址解析一直超时。
+   */
+  async function loadKeyForm() {
+    try {
+      const mk = await fetch('/api/mapkey').then((r) => r.json()).catch(() => null);
+      const key = (mk && mk.key) || '';
+      const sec = (mk && typeof mk.securityJsCode === 'string') ? mk.securityJsCode : '';
+      state.savedKey = key;
+      state.savedSec = sec;
+      el.cfgKey.value = '';
+      el.cfgKey.placeholder = key ? '已配置（留空保持不变）' : '留空则使用演练模式（虚构路网）';
+      el.cfgSec.value = '';
+      el.cfgSec.placeholder = sec ? '已配置（留空保持不变）' : '启用静态安全密钥的 Key 必填（不是 Key 本身）';
+    } catch (_) { /* noop */ }
+  }
+
+  /** 检查邮箱里有没有 NetWalk 存档邮件，更新状态指示灯 */
+  async function checkMailBox() {
+    if (!el.mailBoxStatus) return;
+    el.mailBoxStatus.textContent = '邮箱存档状态：检查中…';
+    el.mailBoxStatus.style.color = '';
+    try {
+      const j = await fetch('/api/mailbox/status').then((r) => r.json());
+      if (!j.imapConfigured) {
+        el.mailBoxStatus.textContent = '邮箱存档状态：未配置 IMAP（无法读取），填 imap.qq.com 后可用';
+        el.mailBoxStatus.style.color = '#ffb020';
+        return;
+      }
+      if (!j.ok) {
+        el.mailBoxStatus.textContent = '邮箱存档状态：读取失败（' + (j.error || '') + '）';
+        el.mailBoxStatus.style.color = '#ff5d5d';
+        return;
+      }
+      if (j.hasArchive) {
+        el.mailBoxStatus.textContent = `邮箱里已有 ${j.count} 封存档邮件 ✓ 换设备可一键续档`;
+        el.mailBoxStatus.style.color = '#4bd06a';
+      } else {
+        el.mailBoxStatus.textContent = '邮箱里还没有存档邮件 ⚠ 点右边「⬆ 上传存档」发一封';
+        el.mailBoxStatus.style.color = '#ffb020';
+      }
+    } catch (e) {
+      el.mailBoxStatus.textContent = '邮箱存档状态：检查失败（' + (e && e.message ? e.message : e) + '）';
+      el.mailBoxStatus.style.color = '#ff5d5d';
+    }
+  }
+
+  async function openAccount() {
+    el.maskAccount.classList.add('show');
+    const j = await refreshAccount();
+    renderAccount(j);
+  }
+
+  /** 账号变更后需要重启服务才能切到新数据目录；onReady 在确认新进程就绪后回调 */
+  function restartForAccount(onReady) {
+    const oldPid = state.pid || null;
     log('账号已切换，正在重启服务加载新档案…');
     el.btnAccount.textContent = '🔄 重启中';
     fetch('/api/restart', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' })
-      .catch(() => { /* noop */ });
-    // 新进程起来后页面照常自动重连 WS；2.5 秒后刷新一次账号状态
+      .catch(() => { /* 这个请求本身失败也继续轮询 */ });
     clearInterval(accountTimer);
+    let tries = 0;
+    let fired = false;
+    // 关键：必须等到「换了 pid 的新进程」才算重启成功 ——
+    // 旧进程在让出端口前还会应答，只判断"有没有响应"会过早地以为已重启。
     accountTimer = setInterval(async () => {
+      tries += 1;
       const j = await refreshAccount();
-      if (j) { clearInterval(accountTimer); log('服务已重启，档案加载完成'); }
-    }, 1500);
+      if (j && j.pid && j.pid !== oldPid) {
+        clearInterval(accountTimer);
+        log(`服务已重启（pid ${j.pid}），档案加载完成`);
+        if (!fired && typeof onReady === 'function') { fired = true; try { onReady(); } catch (_) { /* noop */ } }
+        return;
+      }
+      if (tries >= 18) {
+        clearInterval(accountTimer);
+        el.btnAccount.textContent = '⚠ 需手动重开';
+        log('⚠ 服务重启后一直没恢复响应。请关闭 NetWalk（含托盘图标）再重新双击 NetWalk.exe —— 数据已保存不会丢。');
+      }
+    }, 1200);
     setTimeout(() => clearInterval(accountTimer), 30000);
+    // 兜底：若 10 秒还没连上（例如端口被重算、服务没能拉起），直接刷新页面自救，
+    // 避免用户卡在"登录失败 Failed to fetch"却不知道该怎么办
+    setTimeout(async () => {
+      try {
+        const r = await fetch('/api/status');
+        if (!r.ok) location.reload();
+      } catch (_) { location.reload(); }
+    }, 10000);
   }
 
   // ---------- 旅行者档案 ----------
@@ -259,15 +370,16 @@
     const p = state.profile;
     if (p && p.exists) {
       el.profileInfo.textContent = `旅行者：${p.name} · ${p.emailMasked} · 出发点：${p.originName || p.city || '未设定'}`;
-      el.originLockHint.style.display = 'inline';
       el.profileInfo.style.display = 'block';
-      // 出发点编辑收起来：修改 = 重置
-      ['orSearch', 'btnOrSearch', 'btnOrPick', 'btnOrGeo', 'btnOrReset'].forEach((id) => {
-        if (el[id]) el[id].disabled = true;
-      });
+      el.originLockHint.style.display = 'inline';   // 仅提示"改完要点保存"，不再锁死出发点
     } else {
       el.profileInfo.textContent = '尚未创建档案。首次出发前建议先在欢迎弹窗里注册（起名字 + 选出发点）。';
+      el.originLockHint.style.display = 'none';
     }
+    // 出发点始终可改（重置之后必然要重选）——确保搜索/点选/定位/重置按钮都是可用的
+    ['orSearch', 'btnOrSearch', 'btnOrPick', 'btnOrGeo', 'btnOrReset'].forEach((id) => {
+      if (el[id]) el[id].disabled = false;
+    });
   }
 
   async function checkProfile() {
@@ -336,9 +448,19 @@
       log('未注册也可以直接玩（演练模式）；「设置 → 档案」里随时可以注册。');
     });
 
+    // 换设备 / 已有档案：走登录，而不是再注册一份新档案
+    if (el.btnRgLogin) el.btnRgLogin.addEventListener('click', () => {
+      el.maskRegister.classList.remove('show');
+      openAccount();
+      log('已打开「账号与档案」：填邮箱 → 获取验证码 → 点「用验证码登录」，登录后可一键同步旧存档。');
+    });
+
     // 重置流程
     el.btnOpenReset.addEventListener('click', () => {
       fillCitySelect(el.rsCity);
+      // 默认选中当前城市，而不是列表第一项（避免一不留神把出发点重置到别的城市）
+      const cur = (el.cfgCity && el.cfgCity.value) || '';
+      if (cur && el.rsCity.querySelector(`option[value="${cur}"]`)) el.rsCity.value = cur;
       el.rsConfirm.value = '';
       el.maskReset.classList.add('show');
     });
@@ -365,7 +487,9 @@
         }
         el.maskReset.classList.remove('show');
         el.maskSettings.classList.remove('show');
-        log('已重置全部数据，出发点改为 ' + city + '。页面即将刷新…');
+        try { localStorage.setItem('netwalkJustReset', '1'); } catch (_) { /* noop */ }
+        try { localStorage.setItem('netwalkNoAutoSync', '1'); } catch (_) { /* noop */ }
+        log('已重置全部数据。刷新后请在「设置 → 出发点」重新选择出发位置，再点「保存并重启漫游」。');
         setTimeout(() => location.reload(), 900);
       } catch (e) {
         el.rsConfirm.placeholder = '重置失败：' + (e && e.message ? e.message : e);
@@ -434,9 +558,39 @@
     bindProfileUi();
     setupLocalKeyFallback();
     checkProfile();
+    // 刚重置过：自动打开设置、滚到「出发点」，引导用户重选起点（重置后必做的一步）
+    try {
+      if (localStorage.getItem('netwalkJustReset') === '1') {
+        localStorage.removeItem('netwalkJustReset');
+        setTimeout(() => {
+          el.keyNotice.style.display = state.cfg.hasKey ? 'none' : 'block';
+          renderOriginFields();
+          loadMailForm();
+          loadKeyForm();   // 必须回填！否则保存时 savedKey 为空，会把已配置的 Key 清掉（地图变虚拟路网）
+          el.maskSettings.classList.add('show');
+          const f = $('originField');
+          if (f && f.scrollIntoView) f.scrollIntoView({ block: 'center' });
+          log('重置完成：请在「出发点」里重新选择起始位置，然后点「保存并重启漫游」。');
+        }, 600);
+      }
+    } catch (_) { /* noop */ }
 
     if (useCustom) log(`出发点：${state.cfg.originName || '自定义位置'}`);
     else log(`出发点：${city}市中心（可在设置里改成任意地点）`);
+
+    // 打开软件时，地图中心 = 上次结束点（而不是出发点）——用户每天打开都该"接着上次看"
+    findLastPosition().then((lp) => {
+      if (!lp) return;
+      try {
+        const p = state.provider;
+        if (p && p.map && typeof p.map.setCenter === 'function') {
+          p.map.setCenter([lp.lng, lp.lat]);
+        } else if (p && typeof p.setCenter === 'function') {
+          p.setCenter(lp.lng, lp.lat);
+        }
+        log(`地图已定位到上次结束位置（${lp.lat.toFixed(4)}, ${lp.lng.toFixed(4)}）——出发也将从这里继续`);
+      } catch (_) { /* 演练模式等没有 setCenter 的情况忽略 */ }
+    });
 
     if (!state.cfg.hasKey) {
       el.pillMap.textContent = '演练路网（虚构）';
@@ -580,14 +734,66 @@
   }
 
   // ---------- 引擎 ----------
+  /**
+   * 完整的一键同步：恢复配置（高德 Key / 邮箱 / 出发点）+ 拉回最新存档。
+   * 登录后 / 「一键同步」按钮共用。返回摘要供 UI 展示。
+   */
+  async function syncFromMailbox() {
+    const res = { ok: false, restored: '', pulled: '', keyRestored: false, days: 0 };
+    const rc = await fetch('/api/mailbox/restore-config', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    }).then((x) => x.json()).catch(() => null);
+    if (rc && rc.ok) res.restored = '配置 ' + (rc.restored || []).length + ' 项';
+    const mp = await fetch('/api/mailbox/pull', {
+      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+    }).then((x) => x.json()).catch(() => null);
+    if (mp && mp.ok) {
+      res.ok = true;
+      res.days = (mp.result && mp.result.days) || 0;
+      res.pulled = '存档 ' + res.days + ' 天';
+      if (mp.keyRestored) res.keyRestored = true;
+      // 明确告诉用户接下来会从哪里继续（跨设备同步后尤其重要，不然不知道有没有同步对）
+      try {
+        const lp = await fetch('/api/lastpos').then((x) => x.json()).catch(() => null);
+        if (lp && lp.pos !== null && isFiniteLatLng(lp)) {
+          res.resume = { lat: Number(lp.lat), lng: Number(lp.lng), date: lp.date };
+        }
+      } catch (_) { /* noop */ }
+      // 出发次数（两台设备合并并全局重排后的总数）
+      try {
+        const ss = await fetch('/api/sessions').then((x) => x.json()).catch(() => null);
+        if (ss && Array.isArray(ss.starts) && ss.starts.length) res.sessionCount = ss.starts.length;
+      } catch (_) { /* noop */ }
+    } else if (mp && mp.error) {
+      res.pulled = mailErrorHint(mp.error);
+    }
+    return res;
+  }
+
   /** 出发前从邮箱拉回最新存档码（配置了 IMAP 才可用；失败不影响本地出发） */
   async function pullArchiveFromMailbox() {
     try {
+      // 重置过后不再自动同步：否则点一次「出发」就把邮箱里的旧存档（含重置前那些错误数据）
+      // 又拉回来了，表现为"重置了没用、一点出发又飞回深圳"。想同步请到「账号与档案」点「一键同步」。
+      if (localStorage.getItem('netwalkNoAutoSync') === '1') {
+        log('已重置：本次不自动从邮箱同步（避免把旧存档拉回来）。需要同步请到「账号与档案」点「一键同步」。');
+        return;
+      }
       const r = await fetch('/api/mailbox/pull', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
       const j = await r.json();
       if (j.ok) {
         const imp = j.result || {};
-        log(`已从邮箱同步最新存档（${imp.mergedDays != null ? imp.mergedDays + ' 天' : '完成'}），将从上次结束点继续`);
+        // 同步把高德 Key 也带回来了（新设备原本没有）→ 必须重载才能从虚拟路网切到真实地图
+        if (j.keyRestored) {
+          log('检测到本机没有高德 Key，已从邮箱存档自动恢复 —— 正在重新加载以启用真实地图…');
+          setTimeout(() => location.reload(), 1500);
+          return;
+        }
+        const extras = [];
+        if (j.restoredKeys && j.restoredKeys.length) extras.push('配置 ' + j.restoredKeys.length + ' 项');
+        log(`已从邮箱同步最新存档（${imp.mergedDays != null ? imp.mergedDays + ' 天' : '完成'}）`
+          + (extras.length ? '，并恢复' + extras.join('、') : '')
+          + '，将从上次结束点继续');
       }
       // 失败静默：本地数据照常使用，具体原因在日志里（未配置 IMAP / 收件箱无存档邮件）
     } catch (_) { /* 离线时忽略 */ }
@@ -727,18 +933,36 @@
       }).then((r) => r.json());
       if (endRes && endRes.achievements) {
         state.ach = endRes.achievements;
-        if (endRes.achievements.got) el.achDot.classList.add('on');
+        if (endRes.achievements.got) setAchDot(endRes.achievements.got > achSeenCount());
         if (endRes.achievements.newly && endRes.achievements.newly.length) {
           announceAchievements(endRes.achievements.newly);
         }
       }
-      const r = await fetch(`/api/report/${today()}`, { method: 'POST' });
-      const j = await r.json();
-      if (j.ok) state.reportUrl = j.url;
     } catch (err) {
-      log('日报生成失败：' + err.message);
+      log('结束上报失败：' + (err && err.message ? err.message : err));
     }
     showDone(stats);
+    ensureReport(today());   // 面板先弹出来，日报在后台生成 —— 不阻塞「打开今日日报」按钮
+  }
+
+  /**
+   * 生成（或复用）某天的日报，返回可打开的 URL；失败返回 null 并把原因写进 state.reportError
+   * 注意：调用方要负责给用户可见反馈，别让按钮"点了没反应"。
+   */
+  async function ensureReport(date) {
+    state.reportDate = date;
+    state.reportUrl = '';
+    state.reportError = '';
+    try {
+      const r = await fetch('/api/report/' + date, { method: 'POST' });
+      const j = await r.json().catch(() => null);
+      if (j && j.ok && j.url) { state.reportUrl = j.url; return j.url; }
+      state.reportError = (j && j.error) || '服务器没有生成日报';
+      return null;
+    } catch (e) {
+      state.reportError = (e && e.message) ? e.message : String(e);
+      return null;
+    }
   }
 
   function showDone(stats) {
@@ -754,6 +978,7 @@
     el.doneStats.innerHTML = items.map((i) =>
       `<div class="done-stat"><div class="k">${i.k}</div><div class="v">${i.v}<small>${i.u}</small></div></div>`).join('');
     el.maskDone.classList.add('show');
+    if (el.doneHint) el.doneHint.textContent = '';
 
     // 存档码：结束后直接给出，方便复制到其他设备继承数据
     state.lastArchiveCode = '';
@@ -773,11 +998,22 @@
   }
 
   // ---------- 成就 ----------
+  /** 成就红点：只在"有没看过的成就"时亮；打开成就墙后熄灭并记住已看数量 */
+  function achSeenCount() {
+    try { const v = parseInt(localStorage.getItem('netwalkAchSeen') || '0', 10); return Number.isFinite(v) ? v : 0; }
+    catch (_) { return 0; }
+  }
+  function setAchDot(on) { if (el.achDot) el.achDot.classList.toggle('on', Boolean(on)); }
+  function markAchSeen(count) {
+    try { localStorage.setItem('netwalkAchSeen', String(count || 0)); } catch (_) { /* noop */ }
+    setAchDot(false);
+  }
+
   async function refreshAchievements({ silent = true } = {}) {
     try {
       const r = await fetch('/api/achievements').then((x) => x.json());
       state.ach = r;
-      if (r.got) el.achDot.classList.add('on');
+      setAchDot((r.got || 0) > achSeenCount());   // 有新成就才亮，而不是"有成就就一直亮"
       if (!silent && r.newly && r.newly.length) announceAchievements(r.newly);
       return r;
     } catch (_) { return null; }
@@ -793,6 +1029,7 @@
 
   async function openAch() {
     if (!state.ach) await refreshAchievements();
+    markAchSeen((state.ach && state.ach.got) || 0);   // 看过就熄灭红点
     state.achFilter = state.achFilter || 'all';
     el.achBody.innerHTML = window.NetWalkAch.wallHtml(
       (state.ach && state.ach.unlocked) || {},
@@ -906,6 +1143,18 @@
       if (!r.ok) throw new Error(r.error || '导入失败');
       el.arHint.textContent = `导入成功：新增 ${r.added} 天，合并 ${r.merged} 天，当前共 ${r.days} 天`;
       log(`存档导入完成（新增 ${r.added} 天 / 合并 ${r.merged} 天）`);
+      // 手动导入 = 明确要恢复这份数据，解除"重置后暂停自动同步"
+      try { localStorage.removeItem('netwalkNoAutoSync'); } catch (_) { /* noop */ }
+      // 存档码里带了本机配置（高德 Key / 邮箱）→ 提示可一键恢复（换设备免手填）
+      state.lastImportedCode = code;
+      if (el.btnArApplyCfg) {
+        if (r.cfgAvailable) {
+          el.btnArApplyCfg.style.display = '';
+          el.arHint.textContent += '　这个存档码还带了本机配置（高德 Key / 邮箱），可点「恢复本机配置」一并恢复。';
+        } else {
+          el.btnArApplyCfg.style.display = 'none';
+        }
+      }
       await refreshAchievements({ silent: false });
       el.arInput.value = '';
     } catch (err) {
@@ -1371,25 +1620,62 @@
 
     // 存档
     el.btnArchive.addEventListener('click', () => el.maskArchive.classList.add('show'));
+    // 把邮箱同步/恢复的错误翻译成更直白的话：特别区分「连不上」和「连上了但收件箱没存档邮件」
+    function mailErrorHint(raw) {
+      const s = String(raw || '');
+      if (s.indexOf('还没有 NetWalk 存档邮件') >= 0) {
+        return '邮箱已连上 ✓，但收件箱里还没有 NetWalk 存档邮件（首次使用、或旧设备从未发送过均属正常）。生成第一封：在旧设备「结束漫游」会自动发到本邮箱；或到旧设备「存档」弹窗复制存档码导入这里。';
+      }
+      if (s.indexOf('未配置 IMAP') >= 0) return '邮箱还没配好 IMAP：请到 ⚙ 设置 → 📮 邮件服务 填 imap.qq.com、邮箱账号与授权码。';
+      if (s.indexOf('超时') >= 0 || s.indexOf('IMAP 错误') >= 0 || s.indexOf('拒绝连接') >= 0) return '连不上邮箱：' + s + '。请确认 IMAP 服务已开启、授权码正确，且能访问 imap.qq.com:993。';
+      return s || '未知错误';
+    }
         // 一键同步：恢复邮箱里保存的配置 + 拉回最新存档码（登录账号 / 换设备时用）
     el.btnSync.addEventListener('click', async () => {
       const btn = el.btnSync;
       const old = btn.innerHTML;
       btn.disabled = true; btn.textContent = '同步中…';
-      let restored = '', pulled = '';
+      // 用户主动点同步 = 明确要把邮箱数据取回来，解除"重置后暂停自动同步"
+      try { localStorage.removeItem('netwalkNoAutoSync'); } catch (_) { /* noop */ }
       try {
-        const rc = await fetch('/api/mailbox/restore-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).then((x) => x.json()).catch(() => null);
-        if (rc && rc.ok) restored = '配置已恢复（' + (rc.restored || []).length + ' 项）'; else if (rc) restored = rc.error || '';
-        const mp = await fetch('/api/mailbox/pull', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).then((x) => x.json()).catch(() => null);
-        if (mp && mp.ok) pulled = '存档已同步'; else if (mp) pulled = mp.error || '';
-        log('🔄 一键同步：' + [restored, pulled].filter(Boolean).join('；'));
-        if (!restored && !pulled) log('同步未完成：请先在 ⚙ 设置 → 📮 配置邮件服务里填好 SMTP/IMAP 授权码');
+        const r = await syncFromMailbox();
+        const parts = [];
+        if (r.restored) parts.push(r.restored);
+        if (r.ok) parts.push(r.pulled); else if (r.pulled) parts.push(r.pulled);
+        log('🔄 一键同步：' + (parts.filter(Boolean).join('；') || '未完成'));
+        if (!parts.filter(Boolean).length) log('同步未完成：请先在 ⚙ 设置 → 📮 配置邮件服务里填好 SMTP/IMAP 授权码');
+        if (r.keyRestored) {
+          log('已恢复高德 Key，正在重新加载以启用真实地图…');
+          setTimeout(() => location.reload(), 1500);
+          return;
+        }
+        if (r.ok) {
+          if (r.sessionCount) log(`出发记录已合并为 ${r.sessionCount} 次（已重新编号）`);
+          if (r.resume) log(`出发时将从 ${r.resume.date} 的结束位置（${r.resume.lat.toFixed(4)}, ${r.resume.lng.toFixed(4)}）继续。`);
+          else log('出发时将从上次结束位置继续。');
+        }
       } catch (e) {
         log('同步失败：' + (e && e.message ? e.message : e));
       } finally {
         btn.disabled = false; btn.innerHTML = old;
       }
     });
+
+    // 登录后自动从邮箱同步（换设备首次登录）：登录流程写了一个待同步标记，服务重启后在这里执行
+    try {
+      if (localStorage.getItem('netwalkPendingSync') === '1') {
+        localStorage.removeItem('netwalkPendingSync');
+        setTimeout(async () => {
+          log('检测到刚登录，正在从邮箱同步旧存档…');
+          const rc = await fetch('/api/mailbox/restore-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).then((x) => x.json()).catch(() => null);
+          const mp = await fetch('/api/mailbox/pull', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' }).then((x) => x.json()).catch(() => null);
+          if (rc && rc.ok) log('已从邮箱恢复 ' + (rc.restored || []).length + ' 项配置 ✓');
+          if (mp && mp.ok) log('已从邮箱同步旧存档 ✓');
+          else if (mp && mp.error) log('邮箱同步：' + mailErrorHint(mp.error));
+        }, 2500);
+      }
+    } catch (_) { /* noop */ }
+
 el.btnReport.addEventListener('click', () => {
       // 摸鱼外观的纯文字 Excel 报表（看起来像在工作）
       window.open('/report-excel.html', '_blank', 'noopener');
@@ -1424,6 +1710,28 @@ el.btnReport.addEventListener('click', () => {
     el.btnArGen.addEventListener('click', genArchive);
     el.btnArCopy.addEventListener('click', copyArchive);
     el.btnArImport.addEventListener('click', doImport);
+    // 恢复存档码里携带的本机配置（高德 Key / 邮箱）：换设备时免手填
+    if (el.btnArApplyCfg) el.btnArApplyCfg.addEventListener('click', async () => {
+      const code = state.lastImportedCode || el.arInput.value.trim() || el.arCode.value.trim();
+      if (!code) { el.arHint.textContent = '请先粘贴并导入存档码'; return; }
+      el.btnArApplyCfg.disabled = true;
+      const old = el.btnArApplyCfg.textContent;
+      el.btnArApplyCfg.textContent = '恢复中…';
+      try {
+        const r = await fetch('/api/archive/apply-config', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ code }),
+        }).then((x) => x.json());
+        if (!r.ok) throw new Error(r.error || '恢复失败');
+        el.arHint.textContent = `已恢复本机配置（${(r.restored || []).length} 项）。正在重新加载设置…`;
+        log('已从存档码恢复本机配置：' + (r.restored || []).join(', '));
+        setTimeout(() => location.reload(), 900);
+      } catch (e) {
+        el.arHint.textContent = '恢复失败：' + (e && e.message ? e.message : e);
+      } finally {
+        el.btnArApplyCfg.disabled = false;
+        el.btnArApplyCfg.textContent = old;
+      }
+    });
 
     // 分享
     el.btnShare.addEventListener('click', openShare);
@@ -1443,12 +1751,52 @@ el.btnReport.addEventListener('click', () => {
     el.btnPop.addEventListener('click', () => {
       window.open('/dock.html', 'netwalk-dock', 'width=326,height=430,menubar=no,toolbar=no,location=no');
     });
-    $('btnOpenReport') && el.btnOpenReport.addEventListener('click', () => {
-      if (state.reportUrl) window.open(state.reportUrl, '_blank');
+    // 打开今日日报：有 URL 直接开；没有就现场生成一次；始终给可见反馈（不再"点了没反应/按不动"）
+    el.btnOpenReport.addEventListener('click', async () => {
+      const btn = el.btnOpenReport;
+      const old = btn.textContent;
+      let url = state.reportUrl;
+      if (!url) {
+        btn.disabled = true; btn.textContent = '日报生成中…';
+        if (el.doneHint) el.doneHint.textContent = '正在生成日报…';
+        url = await ensureReport(state.reportDate || today());
+        btn.disabled = false; btn.textContent = old;
+      }
+      if (url) {
+        if (el.doneHint) el.doneHint.textContent = '';
+        window.open(url, '_blank');
+      } else {
+        const why = state.reportError || '当天还没有轨迹数据（先走一会儿再结束就能生成）';
+        if (el.doneHint) el.doneHint.textContent = '日报打不开：' + why;
+        log('日报打不开：' + why);
+      }
     });
     el.btnRestart.addEventListener('click', () => {
       el.maskDone.classList.remove('show');
       startWalk();
+    });
+    // 结束面板：把存档码直接发到邮箱（换设备一键续档）
+    if (el.btnDoneMail) el.btnDoneMail.addEventListener('click', async () => {
+      const btn = el.btnDoneMail;
+      const old = btn.textContent;
+      btn.disabled = true; btn.textContent = '发送中…';
+      if (el.doneHint) el.doneHint.textContent = '正在把存档码发送到你的邮箱…';
+      try {
+        const j = await fetch('/api/mailbox/push', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+        }).then((r) => r.json());
+        const msg = j.ok
+          ? ('已把存档码发到 ' + (j.to || '你的邮箱') + ' ✓ 换设备登录后一键同步即可续档')
+          : ('发送失败：' + (j.error || '未知错误'));
+        if (el.doneHint) el.doneHint.textContent = msg;
+        log(msg);
+      } catch (e) {
+        const msg = '发送失败：' + (e && e.message ? e.message : e);
+        if (el.doneHint) el.doneHint.textContent = msg;
+        log(msg);
+      } finally {
+        btn.disabled = false; btn.textContent = old;
+      }
     });
     el.btnDoneArcCopy.addEventListener('click', async () => {
       const code = el.doneArc.value || state.lastArchiveCode || '';
@@ -1475,6 +1823,9 @@ el.btnReport.addEventListener('click', () => {
     const openSettings = () => {
       el.keyNotice.style.display = state.cfg.hasKey ? 'none' : 'block';
       renderOriginFields();
+      loadMailForm();     // 回填已保存的邮箱配置（否则输入框空白，用户以为没保存，只好反复重填）
+      loadKeyForm();      // 回填高德 Key / 安全密钥的"已配置"提示（否则会被误填成一样的值）
+      checkMailBox();     // 顺带查一下邮箱里到底有没有存档
       el.maskSettings.classList.add('show');
     };
     document.addEventListener('keydown', (e) => {
@@ -1501,7 +1852,12 @@ el.btnReport.addEventListener('click', () => {
       try {
         const r = await fetch('/api/mailbox/restore-config', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
         const j = await r.json();
-        if (!j.ok) { mailHintEl.textContent = '恢复失败：' + (j.error || '未知错误'); return; }
+        if (!j.ok) {
+          const noArchive = String(j.error || '').indexOf('还没有 NetWalk 存档邮件') >= 0;
+          // 「没存档邮件」不算连接失败，不显示"恢复失败"，避免用户误以为授权没成功
+          mailHintEl.textContent = (noArchive ? '' : '恢复失败：') + mailErrorHint(j.error || '未知错误');
+          return;
+        }
         mailHintEl.textContent = '已从邮箱恢复 ' + (j.restored || []).length + ' 项配置' + (j.hasKey ? '（高德 Key 已恢复 ✓）' : '（邮件里没有 Key）');
         log('机器配置已从邮箱恢复：' + (j.restored || []).join(', '));
         const c = await fetch('/api/config').then((x) => x.json());
@@ -1534,8 +1890,8 @@ el.btnReport.addEventListener('click', () => {
         if (!j.ok) { el.accCodeHint.textContent = j.error || '发送失败'; return; }
         el.accCodeHint.textContent = j.sent
           ? '验证码已发送到邮箱，5 分钟内有效'
-          : `验证码：${j.devCode}（未配置邮件服务，仅本机可见，5 分钟内有效）`;
-      } catch (e) { el.accCodeHint.textContent = '发送失败：' + (e && e.message ? e.message : e); }
+          : (j.hint || `验证码：${j.devCode}（仅本机可见，5 分钟内有效）`);
+      } catch (e) { el.accCodeHint.textContent = '发送失败：' + netErr(e); }
     });
     const accPost = (url, body) => fetch(url, {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body || {}),
@@ -1548,15 +1904,39 @@ el.btnReport.addEventListener('click', () => {
         if (!j.ok) { el.accCodeHint.textContent = j.error || '注册失败'; return; }
         log(`档案「${j.account.name}」创建成功`);
         restartForAccount();
-      } catch (e) { el.accCodeHint.textContent = '注册失败：' + (e && e.message ? e.message : e); }
+      } catch (e) { el.accCodeHint.textContent = '注册失败：' + netErr(e); }
     });
     el.btnAccLogin.addEventListener('click', async () => {
       try {
-        const j = await accPost('/api/account/login', { email: el.accEmailInput.value.trim(), code: el.accCode.value.trim() });
+        const j = await accPost('/api/account/login', {
+          email: el.accEmailInput.value.trim(), code: el.accCode.value.trim(), name: el.accNameInput.value.trim(),
+        });
         if (!j.ok) { el.accCodeHint.textContent = j.error || '登录失败'; return; }
-        log(`已登录档案「${j.account.name}」`);
-        restartForAccount();
-      } catch (e) { el.accCodeHint.textContent = '登录失败：' + (e && e.message ? e.message : e); }
+        el.accCodeHint.textContent = '登录成功 ✓ 正在重启并从邮箱同步该账号的数据…';
+        log(j.createdHere
+          ? `已在本机创建档案「${j.account.name}」（新设备首次登录），正在重启并同步…`
+          : `已登录档案「${j.account.name}」，正在从邮箱同步数据…`);
+        // 重启完成（确认新 pid）后立刻一键同步：配置 + 该邮箱账号的存档
+        restartForAccount(async () => {
+          el.accCodeHint.textContent = '正在从邮箱同步数据与配置…';
+          const r = await syncFromMailbox();
+          if (r.keyRestored) {
+            el.accCodeHint.textContent = '同步完成：已恢复高德 Key 与存档，正在重新加载…';
+            setTimeout(() => location.reload(), 1500);
+            return;
+          }
+          const parts = [];
+          if (r.restored) parts.push(r.restored);
+          if (r.ok) parts.push(r.pulled); else if (r.pulled) parts.push(r.pulled);
+          if (r.sessionCount) parts.push('出发记录 ' + r.sessionCount + ' 次');
+          let tail = '点「出发」将从上次结束位置继续。';
+          if (r.resume) tail = `点「出发」将从 ${r.resume.date} 的结束位置（${r.resume.lat.toFixed(4)}, ${r.resume.lng.toFixed(4)}）继续。`;
+          el.accCodeHint.textContent = parts.length
+            ? ('同步完成 ✓ ' + parts.join('，') + '。' + tail)
+            : '同步未完成：请先在 ⚙ 设置 → 📮 邮件服务 填好 SMTP/IMAP，再点「一键同步」。';
+          log('🔄 登录后同步：' + (parts.join('；') || '未完成'));
+        });
+      } catch (e) { el.accCodeHint.textContent = '登录失败：' + netErr(e); }
     });
     el.btnAccRename.addEventListener('click', async () => {
       const name = el.accNewName.value.trim();
@@ -1573,7 +1953,8 @@ el.btnReport.addEventListener('click', () => {
       const j = await accPost('/api/account/reset', { confirmText: el.accResetText.value.trim() });
       if (j.ok) {
         el.accResetHint.textContent = `已重置：清了 ${j.removed} 项数据。${j.note}`;
-        log('⚠ 档案已重置：轨迹与成就清空，出发点回到城市中心');
+        log('⚠ 档案已重置：轨迹与成就清空（出发点保持不变）。已暂停自动同步，避免把邮箱里的旧存档拉回来；需要时点「一键同步」。');
+        try { localStorage.setItem('netwalkNoAutoSync', '1'); } catch (_) { /* noop */ }
         el.accResetText.value = '';
         if (j.needRestart) restartForAccount();
       } else {
@@ -1596,6 +1977,7 @@ el.btnReport.addEventListener('click', () => {
       if (imapPort) body.mailImapPort = imapPort.trim();
       const pass = el.mailPass.value.trim();
       if (pass) body.mailPass = pass;   // 留空 = 保持原配置
+      if (el.autoMailArchive) body.autoMailArchive = el.autoMailArchive.checked;
       if (!body.mailSmtpHost || !body.mailUser || (!pass && el.mailPass.placeholder.indexOf('已配置') < 0)) {
         el.mailHint.textContent = '服务器、账号、授权码都要填（端口默认 465）';
         return;
@@ -1605,25 +1987,94 @@ el.btnReport.addEventListener('click', () => {
           method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
         });
         if (r.ok) {
-          el.mailHint.textContent = '已保存 ✓ 存档码自动发邮箱；配了 IMAP 后出发时还会自动从邮箱续存档';
+          el.mailHint.textContent = '已保存 ✓ 结束漫游 / 上传时会自动发存档码到邮箱' + (body.mailImapHost ? '，出发时还会自动从邮箱续档' : '');
           log('邮件服务已配置：存档码将自动发到邮箱' + (body.mailImapHost ? '，且出发时自动从邮箱续档' : ''));
+          checkMailBox();   // 保存后立刻刷新「邮箱里有没有存档」指示灯
         } else el.mailHint.textContent = '保存失败';
       } catch (e) { el.mailHint.textContent = '保存失败：' + (e && e.message ? e.message : e); }
     });
+
+    // 检查邮箱里有没有存档邮件
+    el.btnMailStatus.addEventListener('click', checkMailBox);
+    // 立即把当前存档码上传到邮箱（换设备续档用）
+    el.btnMailPush.addEventListener('click', async () => {
+      const btn = el.btnMailPush;
+      const old = btn.textContent;
+      btn.disabled = true; btn.textContent = '发送中…';
+      el.mailHint.textContent = '正在生成存档码并发送到邮箱…';
+      try {
+        const j = await fetch('/api/mailbox/push', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+        }).then((r) => r.json());
+        el.mailHint.textContent = j.ok
+          ? ('已把存档码发到 ' + (j.to || '你的邮箱') + ' ✓ 可到邮箱确认')
+          : ('上传失败：' + (j.error || '未知错误'));
+        if (j.ok) { log('存档码已上传到邮箱，换设备可一键续档'); checkMailBox(); }
+      } catch (e) {
+        el.mailHint.textContent = '上传失败：' + (e && e.message ? e.message : e);
+      } finally {
+        btn.disabled = false; btn.textContent = old;
+      }
+    });
+
+    // 清理旧存档邮件：只保留最新一封（同步只需要最新那封）。两步确认，防误删。
+    if (el.btnMailClean) {
+      let cleanArmed = false, cleanTimer = null;
+      el.btnMailClean.addEventListener('click', async () => {
+        const btn = el.btnMailClean;
+        if (!cleanArmed) {
+          cleanArmed = true;
+          btn.textContent = '再点一次确认删除';
+          if (el.mailHint) el.mailHint.textContent = '将删除除最新一封外的全部 NetWalk 邮件（不影响其他邮件）。再点一次执行。';
+          clearTimeout(cleanTimer);
+          cleanTimer = setTimeout(() => { cleanArmed = false; btn.textContent = '🧹 清理旧邮件'; }, 6000);
+          return;
+        }
+        cleanArmed = false;
+        clearTimeout(cleanTimer);
+        btn.disabled = true; btn.textContent = '清理中…';
+        if (el.mailHint) el.mailHint.textContent = '正在连接邮箱并清理旧 NetWalk 邮件…（邮件多时会慢一点）';
+        try {
+          const j = await fetch('/api/mailbox/cleanup', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+          }).then((r) => r.json());
+          if (j.ok) {
+            const msg = j.deleted > 0 ? `已清理 ${j.deleted} 封旧 NetWalk 邮件，保留最新一封 ✓` : '没有需要清理的旧邮件 ✓';
+            if (el.mailHint) el.mailHint.textContent = msg;
+            log('🧹 ' + msg);
+            checkMailBox();
+          } else {
+            if (el.mailHint) el.mailHint.textContent = '清理失败：' + (j.error || '未知错误');
+          }
+        } catch (e) {
+          if (el.mailHint) el.mailHint.textContent = '清理失败：' + (e && e.message ? e.message : e);
+        } finally {
+          btn.disabled = false; btn.textContent = '🧹 清理旧邮件';
+        }
+      });
+    }
 
     el.btnCloseCfg.addEventListener('click', () => el.maskSettings.classList.remove('show'));
     el.btnBossTest.addEventListener('click', toggleBoss);
     el.btnSaveCfg.addEventListener('click', async () => {
       const og = readOriginConfig();
+      const effKey = el.cfgKey.value.trim() || state.savedKey || '';
+      const effSec = el.cfgSec.value.trim() || state.savedSec || '';
       const body = {
-        amapKey: el.cfgKey.value.trim(),
-        amapSecurityJsCode: el.cfgSec.value.trim(),
         city: el.cfgCity.value,
         scope: el.cfgScope.value,
         origin: og.origin,
         originCustom: og.originCustom,
         originName: og.originName,
       };
+      // 只有确定有 Key 才下发 amapKey/provider：
+      // 否则"输入框为空 + savedKey 还没回填完成"时会把 Key 清成空串、provider 打回 drill，
+      // 表现为"重置/保存设置后地图变虚拟路网"。
+      if (effKey) {
+        body.amapKey = effKey;
+        body.amapSecurityJsCode = effSec;
+        body.provider = 'amap';
+      }
       // 老板键：下拉里是 "键码|修饰键"
       const bossSel = String(el.cfgBossKey.value || '67|').split('|');
       body.boss = {
@@ -1631,14 +2082,30 @@ el.btnReport.addEventListener('click', () => {
         key: Number(bossSel[0]) || 67,
         mods: bossSel[1] || '',
       };
-      if (body.amapKey) body.provider = 'amap';
-      else body.provider = 'drill';
       await fetch('/api/config', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
       });
       el.maskSettings.classList.remove('show');
       log('设置已保存，正在重新加载…');
       setTimeout(() => location.reload(), 600);
+    });
+
+    // 清除安全密钥：地址解析一直超时时的排查手段（若 Key 没开「静态安全密钥」，填了反而被拒）
+    if (el.btnSecClear) el.btnSecClear.addEventListener('click', async () => {
+      el.btnSecClear.disabled = true;
+      try {
+        await fetch('/api/config', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ amapKey: state.savedKey || '', amapSecurityJsCode: '__CLEAR__' }),
+        });
+        const msg = '安全密钥已清除。请点「保存并重启漫游」，然后再试一次地址搜索。';
+        if (el.secHint) el.secHint.textContent = msg;
+        log(msg);
+      } catch (e) {
+        if (el.secHint) el.secHint.textContent = '清除失败：' + (e && e.message ? e.message : e);
+      } finally {
+        el.btnSecClear.disabled = false;
+      }
     });
 
     // 出发点

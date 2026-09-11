@@ -12,7 +12,7 @@ const { NetMonitor } = require('./netmon');
 const { KeyMonitor } = require('./keymon');
 const { TrackStore, todayStr } = require('./store');
 const { AchievementStore } = require('./achievements');
-const { exportArchive, importArchive } = require('./archive');
+const { exportArchive, importArchive, decodeArchive, pickCarryConfig } = require('./archive');
 const mailbox = require('./mailbox');
 const { staticMiddleware } = require('./static');
 const { IS_PACKAGED, APP_ROOT, DATA_DIR, PUBLIC_DIR } = require('./paths');
@@ -20,7 +20,8 @@ const { ensurePublic } = require('./webassets');
 const { TrayIcon } = require('./tray');
 const { normalizeBoss } = require('./bosskey');
 const { AccountStore } = require('./account');
-const { sendArchiveMail, configured: mailConfigured } = require('./mailer');
+const { sendArchiveMail, sendMail, configured: mailConfigured } = require('./mailer');
+const profileMod = require('./profile');
 
 // BASE_DATA = 根数据目录（账号列表、运行日志）；ACTIVE_DATA = 当前账号的数据目录
 // 未登录账号时 ACTIVE_DATA === BASE_DATA（兼容老数据）
@@ -40,6 +41,10 @@ const CONFIG_FILE = path.join(ACTIVE_DATA, 'config.json');
 const NO_COLLECT = process.env.NETWALK_NO_COLLECT === '1';
 // 打包运行时双击即用，启动后自动打开浏览器；设 NETWALK_NO_OPEN=1 可关闭
 const NO_OPEN = process.env.NETWALK_NO_OPEN === '1';
+// 由「切换账号 / 重置后的自动重启」拉起的新进程：旧进程此时还没释放端口，
+// 遇到 EADDRINUSE 要重试等待，而不是以为"已在运行"就退出（否则两个进程互相谦让 → 全死）。
+const IS_RESTART = process.env.NETWALK_RESTART === '1';
+let restartRetries = 0;
 // 托盘：打包默认开，源码模式默认关（NETWALK_TRAY=1 强制开，=0 强制关）
 const TRAY_ON = process.platform === 'win32' && (
   process.env.NETWALK_TRAY === '1' || (IS_PACKAGED && process.env.NETWALK_TRAY !== '0')
@@ -102,6 +107,9 @@ const DEFAULT_CONFIG = {
   // IMAP 配好后出发时还能自动从邮箱取回最新存档码（换设备免手动复制）
   mailSmtpHost: '', mailUser: '', mailPass: '',
   mailImapHost: '', mailImapPort: 993,
+  // 结束漫游后是否自动把存档发到邮箱（关掉后仍可手动「⬆ 上传存档 / 📧 发送到邮箱」）。
+  // 邮箱里 NetWalk 邮件太多想清爽一点的用户可以关掉，只在自己想备份时手动发。
+  autoMailArchive: true,
   // 速度换算参数
   speed: {
     netWeight: 0.6,           // 网速权重
@@ -211,6 +219,15 @@ function machineConfigText(cfg) {
   return lines.join('\n');
 }
 
+/**
+ * 存档邮件的收件人。
+ * 注意：账号里存的 email 是**脱敏**的（如 17***@qq.com），不能当收件人用。
+ * 存档邮件永远是「发给你自己配置的那个完整邮箱」，即 config.mailUser。
+ */
+function archiveRecipient() {
+  return String(config.mailUser || '').trim();
+}
+
 /** 解析邮件正文里的配置区（与 machineConfigText 对应），返回键值对象 */
 function parseMachineConfigText(text) {
   const out = {};
@@ -258,7 +275,13 @@ app.post('/api/config', (req, res) => {
     config.amapKey = body.amapKey.trim();
   }
   if (typeof body.amapSecurityJsCode === 'string' && body.amapSecurityJsCode !== '***configured***') {
-    config.amapSecurityJsCode = body.amapSecurityJsCode.trim();
+    let sec = body.amapSecurityJsCode.trim();
+    // '__CLEAR__' 是设置里「清除安全密钥」按钮的显式信号（留空已被前端解释为"保持不变"）
+    if (sec === '__CLEAR__') sec = '';
+    // 安全密钥和 Key 一定是两个不同的值。填成一样的说明用户误把 Key 粘进了安全密钥框，
+    // 会导致高德签名校验失败（表现为地图正常但"地址解析超时"）—— 这里直接忽略，保留原值。
+    if (sec && sec === String(config.amapKey || '').trim()) sec = config.amapSecurityJsCode || '';
+    config.amapSecurityJsCode = sec;
   }
   if (body.provider === 'amap' || body.provider === 'drill') config.provider = body.provider;
   if (['city', 'china', 'world'].includes(body.scope)) config.scope = body.scope;
@@ -274,6 +297,7 @@ app.post('/api/config', (req, res) => {
   if (Number.isFinite(Number(body.amapMaxCallsPerDay))) {
     config.amapMaxCallsPerDay = Math.max(100, Math.min(100000, Math.round(Number(body.amapMaxCallsPerDay))));
   }
+  if (typeof body.autoMailArchive === 'boolean') config.autoMailArchive = body.autoMailArchive;
   if (body.speed && typeof body.speed === 'object') {
     config.speed = { ...config.speed, ...body.speed };
   }
@@ -283,6 +307,17 @@ app.post('/api/config', (req, res) => {
     if (typeof body[k] === 'string') config[k] = body[k].trim();
   }
   saveConfig(config);
+  // 出发点改了 → 同步到旅行者档案（否则档案面板会一直显示旧出发点）
+  if ((body.origin && Number.isFinite(Number(body.origin.lng))) || typeof body.originCustom === 'boolean') {
+    try {
+      const custom = Boolean(config.originCustom) && Boolean(config.origin) && Number.isFinite(Number(config.origin.lng));
+      profileMod.updateOrigin({
+        city: config.city,
+        origin: custom ? config.origin : null,
+        originName: custom ? (config.originName || '') : '',
+      });
+    } catch (_) { /* 档案不存在 / 写失败都不影响保存 */ }
+  }
   res.json({ ok: true, hasKey: Boolean(config.amapKey) });
 });
 
@@ -291,6 +326,30 @@ const { VERSION, CHANGELOG } = require('./version');
 
 app.get('/api/version', (req, res) => {
   res.json({ ok: true, version: VERSION, changelog: CHANGELOG });
+});
+
+/**
+ * 自检：换设备 / 排查"登录不了 / 同步不了"时，浏览器直接打开 /api/selfcheck 就能看到关键状态。
+ * 只暴露布尔与路径，不泄露任何密钥内容。
+ */
+app.get('/api/selfcheck', (req, res) => {
+  res.json({
+    ok: true,
+    version: VERSION,
+    pid: process.pid,
+    port: PORT,
+    packaged: IS_PACKAGED,
+    dataDir: ACTIVE_DATA,
+    hasAmapKey: Boolean(config.amapKey),
+    amapSecurityConfigured: Boolean(config.amapSecurityJsCode),
+    smtpConfigured: mailConfigured(config),
+    imapConfigured: mailbox.imapConfigured(config),
+    mailUserSet: Boolean(config.mailUser),
+    account: activeAccount ? { name: activeAccount.name, email: activeAccount.email } : null,
+    accountsTotal: accounts.list().length,
+    originCustom: Boolean(config.originCustom),
+    message: '把这一页截图发给开发者即可快速定位问题（不含任何明文密钥）',
+  });
 });
 
 // ---------- 账号（单机多档案） ----------
@@ -302,21 +361,33 @@ app.get('/api/account', (req, res) => {
     current: activeAccount,                    // null = 未登录（用默认档案）
     mailConfigured: Boolean(config.mailSmtpHost),
     total: accounts.list().length,
+    pid: process.pid,                          // 前端据此判断"重启后是不是新进程"
+    port: PORT,
   });
 });
 
 /** 获取验证码：配置了邮件服务就发信，否则本机直显（本地单机无泄露风险） */
-app.post('/api/account/code', (req, res) => {
+app.post('/api/account/code', async (req, res) => {
   const email = String((req.body && req.body.email) || '').trim();
   if (!EMAIL_RE.test(email)) return res.status(400).json({ ok: false, error: '邮箱格式不正确' });
   const code = accounts.issueCode(email);
   logLine(`account code issued for ${accounts.maskEmail(email)}`);
   if (config.mailSmtpHost && config.mailUser && config.mailPass) {
-    // 预留：配好 SMTP 后在这里发信（nodemailer），本轮先直显
-    res.json({ ok: true, sent: true });
-  } else {
-    res.json({ ok: true, sent: false, devCode: code, hint: '未配置邮件服务，验证码直接显示（仅本机可见）' });
+    // 真发信：以前这里只回 sent:true 却什么都没发，导致配了邮箱反而收不到验证码、永远登不进去
+    const r = await sendMail(config, email, 'NetWalk 登录验证码',
+      `你的 NetWalk 登录验证码是：${code}\r\n\r\n5 分钟内有效。若不是你本人操作，忽略本邮件即可。`);
+    if (r.ok) {
+      logLine('account code mail sent to ' + accounts.maskEmail(email));
+      return res.json({ ok: true, sent: true });
+    }
+    // 发信失败不能把用户卡死：回退到本机直显，并把原因告诉前端
+    logLine('验证码邮件发送失败：' + (r.error || ''));
+    return res.json({
+      ok: true, sent: false, devCode: code,
+      hint: '邮件发送失败（' + (r.error || '未知') + '），验证码已直接显示（仅本机可见）',
+    });
   }
+  res.json({ ok: true, sent: false, devCode: code, hint: '未配置邮件服务，验证码直接显示（仅本机可见）' });
 });
 
 app.post('/api/account/register', (req, res) => {
@@ -331,8 +402,9 @@ app.post('/api/account/register', (req, res) => {
   activeAccount = acc;   // 同步内存态：重启前的 rename/reset 也能识别
   // 存档码自动发到邮箱（配置了邮件服务才有；换设备时从邮箱复制即可接着走）
   if (mailConfigured(config)) {
-    const code = exportArchive(store, achStore).code;
-    sendArchiveMail(config, acc.email, code, logLine, machineConfigText(config));
+    const code = exportArchive(store, achStore, config).code;
+    sendArchiveMail(config, archiveRecipient(), code, logLine, machineConfigText(config))
+      .then((r) => { if (r && !r.ok) logLine('注册后存档邮件未发出：' + (r.error || '')); });
   }
   res.json({ ok: true, account: acc, needRestart: true });
 });
@@ -340,18 +412,25 @@ app.post('/api/account/register', (req, res) => {
 app.post('/api/account/login', (req, res) => {
   const b = req.body || {};
   const email = String(b.email || '').trim();
-  const acc = accounts.findByEmail(email);
-  if (!acc) return res.status(400).json({ ok: false, error: '该邮箱尚未注册' });
   const v = accounts.verifyCode(email, b.code);
   if (!v.ok) return res.status(400).json(v);
+  // 新设备：本机还没有这份档案。验证码已通过校验，就直接在本机建一份（换设备登录的正常路径），
+  // 之后由前端标记触发「一键同步」，从邮箱把旧数据取回来。
+  let acc = accounts.findByEmail(email);
+  const createdHere = !acc;
+  if (createdHere) {
+    acc = accounts.create(email, b.name || '旅行者');
+    logLine('account auto-created on this device for ' + accounts.maskEmail(email));
+  }
   accounts.setActive(acc);
   activeAccount = acc;   // 同步内存态
   // 登录也发一份最新存档码到邮箱：换设备时打开邮箱复制即可接着走
   if (mailConfigured(config)) {
-    const code = exportArchive(store, achStore).code;
-    sendArchiveMail(config, acc.email, code, logLine, machineConfigText(config));
+    const code = exportArchive(store, achStore, config).code;
+    sendArchiveMail(config, archiveRecipient(), code, logLine, machineConfigText(config))
+      .then((r) => { if (r && !r.ok) logLine('登录后存档邮件未发出：' + (r.error || '')); });
   }
-  res.json({ ok: true, account: acc, needRestart: true });
+  res.json({ ok: true, account: acc, needRestart: true, createdHere });
 });
 
 app.post('/api/account/logout', (req, res) => {
@@ -395,20 +474,15 @@ app.post('/api/account/reset', (req, res) => {
     }
     achStore.forgetAll();   // 内存里的解锁记录也要清，否则 shutdown/save 会写回
     removed++;
-    // 出发点回到城市中心
-    if (fs.existsSync(CONFIG_FILE)) {
-      const cfg = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
-      cfg.originCustom = false;
-      cfg.originName = '';
-      cfg.origin = { lng: DEFAULT_CONFIG.origin.lng, lat: DEFAULT_CONFIG.origin.lat };
-      saveConfig(cfg);
-    }
+    // 出发点【保持不变】：重置的是"走过的数据"，不是"从哪里出发"。
+    // 以前这里会把 origin 打回 DEFAULT（深圳城市中心），用户重置完就从深圳重新开始，
+    // 还得再去设置里重新选一遍出发点 —— 不是用户预期的行为（出发点在设置里随时可改）。
   } catch (err) {
     return res.status(500).json({ ok: false, error: err.message });
   }
   logLine(`account reset done: pid=${process.pid} cleared=${removed} cacheNow=${store.cache.size}`);
   // 必须重启：运行中的 dayTotals 每秒都会重建当天数据，8 秒后又会写回磁盘
-  res.json({ ok: true, removed, needRestart: true, note: '轨迹与成就已清空，出发点已回到城市中心，正在重启服务…' });
+  res.json({ ok: true, removed, needRestart: true, note: '轨迹与成就已清空（出发点保持不变），正在重启服务…' });
 });
 
 /** 切换账号 / 登出后需要重启服务让新的数据目录生效 */
@@ -417,23 +491,38 @@ app.post('/api/restart', (req, res) => {
   // 失败时绝不能把自己退掉 —— 宁可提示用户手动重启，也不能让服务凭空消失。
   let spawned = false;
   let spawnErr = '';
-  if (process.argv[1]) {
-    const { spawn } = require('child_process');
-    try {
-      spawn(process.execPath, [process.argv[1]], { env: process.env, detached: true, stdio: 'ignore', windowsHide: true }).unref();
-      spawned = true;
-    } catch (err) { spawnErr = err && err.message ? err.message : String(err); }
-    if (!spawned) {
-      // 打包 exe 自 spawn 被拦截（EACCES）时，退化为「等同双击」的 cmd start
-      try {
-        spawn('cmd.exe', ['/c', 'start', '', process.execPath], { env: process.env, detached: true, stdio: 'ignore', windowsHide: true }).unref();
-        spawned = true;
-      } catch (err2) { spawnErr += ' / ' + (err2 && err2.message ? err2.message : String(err2)); }
+  const { spawn } = require('child_process');
+  // 给新进程打上「我是被重启拉起的」标记：它会等旧进程释放端口后重试，而不是误判"已在运行"退出。
+  // 必须把"当前实际端口"传给子进程：若本机跑在备用端口（8787 被占 → 8791），
+  // 不传的话子进程会回到 8787，而浏览器页面还停在 8791 → 全线 Failed to fetch。
+  const childEnv = { ...process.env, NETWALK_RESTART: '1', NETWALK_PORT: String(PORT) };
+  const opts = { env: childEnv, detached: true, stdio: 'ignore', windowsHide: true };
+  const trySpawn = (cmd, args, label) => {
+    try { spawn(cmd, args, opts).unref(); return true; }
+    catch (err) {
+      spawnErr += (spawnErr ? ' / ' : '') + label + ':' + (err && err.message ? err.message : String(err));
+      return false;
     }
+  };
+  if (IS_PACKAGED) {
+    // 打包 exe：直接再启动自己（等价于双击），**不要走 cmd start** ——
+    // 中文安装路径经 cmd 可能被编码搞坏，导致新进程起不来、而旧进程已退出 = 服务凭空消失（Failed to fetch）。
+    spawned = trySpawn(process.execPath, [], 'self');
+  } else if (process.argv[1]) {
+    spawned = trySpawn(process.execPath, [process.argv[1]], 'node');
   }
-  logLine('restart: spawned=' + spawned + (spawnErr ? ' err=' + spawnErr : ''));
-  res.json({ ok: true, restarted: spawned, note: spawned ? '服务正在重启…' : '自动重启失败，请手动关闭后重新双击 NetWalk.exe（数据已保存）' });
-  if (spawned) setTimeout(() => { try { shutdown(); } catch (_) { process.exit(0); } }, 600);
+  if (!spawned) spawned = trySpawn('cmd.exe', ['/c', 'start', '', process.execPath], 'cmd');
+  logLine('restart: spawned=' + spawned + ' packaged=' + IS_PACKAGED + (spawnErr ? ' err=' + spawnErr : ''));
+  res.json({
+    ok: true,
+    restarted: spawned,
+    port: PORT,
+    note: spawned
+      ? '服务正在重启…'
+      : '自动重启失败，请手动关闭后重新双击 NetWalk.exe（数据已保存，不会丢）',
+  });
+  // 只有确实拉起了新进程，才让出端口退出；否则继续运行，绝不把自己搞死
+  if (spawned) setTimeout(() => { try { shutdown(); } catch (_) { process.exit(0); } }, 800);
 });
 
 // ---------- 托盘 / 老板键 ----------
@@ -575,17 +664,20 @@ app.post('/api/session/end', (req, res) => {
   const agg = store.aggregate();
   const st = achStore.refresh(agg);
   // 结束也把最新存档码发到邮箱（配置了邮件服务才有）：换设备打开邮箱复制即可接着走
+  // 收件人一律用 config.mailUser（账号里存的是脱敏邮箱，不能当收件人）
+  // autoMailArchive=false 时跳过自动发送（用户想控制邮箱里的邮件量），仍可手动「⬆ 上传存档」
   try {
-    if (mailConfigured(config)) {
-      const acc = (typeof accounts.current === 'function' && accounts.current()) || activeAccount || null;
-      const to = (acc && acc.email) || config.mailUser;
-      if (to) {
-        const { code } = exportArchive(store, achStore);
-        sendArchiveMail(config, to, code, logLine, machineConfigText(config));
-      }
+    const to = archiveRecipient();
+    if (mailConfigured(config) && to && config.autoMailArchive !== false) {
+      const { code } = exportArchive(store, achStore, config);
+      sendArchiveMail(config, to, code, logLine, machineConfigText(config))
+        .then((r) => { if (r && !r.ok) logLine('结束漫游后存档邮件未发出：' + (r.error || '')); });
     }
-  } catch (_) { /* 邮件失败不影响结束 */ }
-  res.json({ ok: true, date, stats: data.stats, achievements: st });
+  } catch (e) { logLine('结束漫游发信异常：' + (e && e.message ? e.message : e)); }
+  res.json({
+    ok: true, date, stats: data.stats, achievements: st,
+    mailQueued: mailConfigured(config) && Boolean(archiveRecipient()) && config.autoMailArchive !== false,
+  });
 });
 
 // ---------- 成就 ----------
@@ -596,7 +688,6 @@ app.get('/api/achievements', (req, res) => {
 });
 
 // ---------- 旅行者档案 ----------
-const profileMod = require('./profile');
 const CITIES_COORDS = require('./cities');
 
 app.get('/api/profile', (req, res) => {
@@ -636,9 +727,26 @@ app.post('/api/profile/reset', (req, res) => {
   if (confirm !== profileMod.RESET_PHRASE) {
     return res.status(400).json({ ok: false, error: '确认文字不匹配，重置已取消' });
   }
-  // 顺序很重要：先清内存缓存（防止 flush 把删掉的文件写回去），再删文件
+  // 顺序很重要：先清内存缓存（防止 8 秒 flush 把旧数据写回去），再清磁盘
   store.forgetAll();
   achStore.forgetAll();
+  // 清空「当前生效的数据目录」里的轨迹 —— 登录账号时就是账号目录（ACTIVE_DATA），
+  // 否则是基础目录。profile.js 只清基础目录，账号模式下清不到，会「重置了数据还在」。
+  // 注意：本机 fs.rmSync 被回收站 shim 重定向（可能删不干净），所以用「覆写清空」而不是删除。
+  let cleared = 0;
+  try {
+    const tracksDir = path.join(ACTIVE_DATA, 'tracks');
+    if (fs.existsSync(tracksDir)) {
+      for (const f of fs.readdirSync(tracksDir)) {
+        if (!f.endsWith('.json')) continue;
+        const date = f.replace('.json', '');
+        fs.writeFileSync(path.join(tracksDir, f), JSON.stringify({
+          date, startedAt: Date.now(), endedAt: null, city: '', path: [], samples: [], rolls: [], stats: null,
+        }), 'utf8');
+        cleared++;
+      }
+    }
+  } catch (err) { logLine('profile reset 清轨迹失败：' + (err && err.message ? err.message : err)); }
   const p = profileMod.resetAll({
     name: (profileMod.load() || {}).name,
     city: String(b.city || ''),
@@ -647,13 +755,32 @@ app.post('/api/profile/reset', (req, res) => {
   });
   const agg = store.aggregate(rangeToBounds('all'));
   achStore.refresh(agg);
-  logLine('profile & data RESET by user confirm');
-  res.json({ ok: true, profile: p ? { name: p.name, city: p.city } : null });
+  logLine('profile & data RESET by user confirm (cleared=' + cleared + ')');
+  res.json({ ok: true, cleared, profile: p ? { name: p.name, city: p.city } : null });
 });
 
-/** 最近一次走过的位置（跨天也从此处继续，而不是回到出发点） */
+/**
+ * 最近一次走过的位置（跨天也从此处继续，而不是回到出发点）。
+ * 关键：按【时间戳最大】取，而不是"最新日期的最后一个点"——
+ * 两台设备交替走并同步后，同一天的轨迹是两台设备的点按导入顺序拼起来的，
+ * 数组最后一个点未必是最新的（可能属于另一台设备的较早行程）。
+ */
 app.get('/api/lastpos', (req, res) => {
   const dates = store.listDates().sort().reverse();
+  let best = null;   // { t, lat, lng, road, date }
+  // 最新 7 天逐点扫（合并后的同一天里混着多台设备的点，必须全扫取时间戳最大的）
+  for (const d of dates.slice(0, 7)) {
+    const path = (store.get(d) || {}).path || [];
+    for (const p of path) {
+      if (!Number.isFinite(p.lat) || !Number.isFinite(p.lng)) continue;
+      const t = Number(p.t) || 0;
+      if (!best || t > best.t) best = { t, lat: p.lat, lng: p.lng, road: p.road || '', date: d };
+    }
+  }
+  if (best && best.t > 0) {
+    return res.json({ ok: true, date: best.date, lat: best.lat, lng: best.lng, road: best.road, at: best.t });
+  }
+  // 兜底：轨迹点都没有时间戳时，退回"最新日期的最后一个有效点"
   for (const d of dates.slice(0, 90)) {
     const path = (store.get(d) || {}).path || [];
     for (let i = path.length - 1; i >= 0; i--) {
@@ -686,9 +813,51 @@ app.get('/api/track/range', (req, res) => {
 app.post('/api/mailbox/pull', (req, res) => {
   mailbox.fetchLatestArchiveCode(config, logLine).then((r) => {
     if (!r.ok) return res.json({ ok: false, error: r.error });
+    // importArchive 失败会抛异常；能走到下一行就说明导入成功了。
+    // （以前写成 Boolean(imp && imp.ok)，而 importArchive 不返回 ok 字段 → 成功也报失败）
     const imp = importArchive(r.code, store, achStore);
     const cloudConfig = r.mailText ? parseMachineConfigText(r.mailText) : {};
-    res.json({ ok: Boolean(imp && imp.ok), result: imp, cloudConfig });
+    // 一键同步 = 换设备续档。存档里携带的本机配置（高德 Key / 邮箱 / 出发点）要一并恢复，
+    // 否则新设备同步完数据却没 Key，只能继续在虚拟路网里走。
+    // 这里自动应用是安全的： mailbox 用的是用户自己的授权码登录，取回的必然是他自己的存档；
+    // （手动「导入他人存档码」那条路才需要用户确认，见 /api/archive/apply-config）
+    const carried = imp.cfg || {};
+    const restored = [];
+    const hadKey = Boolean(config.amapKey);
+    for (const k of ['amapKey', 'amapSecurityJsCode', 'mailSmtpHost', 'mailSmtpPort', 'mailUser', 'mailPass', 'mailImapHost', 'mailImapPort']) {
+      const v = (carried[k] !== undefined) ? carried[k] : cloudConfig[k];
+      if (v !== undefined && v !== null && String(v) !== '') { config[k] = String(v); restored.push(k); }
+    }
+    if (carried.city) config.city = String(carried.city);
+    if (carried.origin && Number.isFinite(Number(carried.origin.lng)) && Number.isFinite(Number(carried.origin.lat))) {
+      config.origin = { lng: Number(carried.origin.lng), lat: Number(carried.origin.lat) };
+    }
+    if (typeof carried.originCustom === 'boolean') config.originCustom = carried.originCustom;
+    if (carried.originName) config.originName = String(carried.originName);
+    if (restored.length || carried.city || carried.origin) {
+      saveConfig(config);
+      try {
+        profileMod.updateOrigin({
+          city: config.city,
+          origin: config.originCustom ? config.origin : null,
+          originName: config.originCustom ? (config.originName || '') : '',
+        });
+      } catch (_) { /* 档案不存在就算了 */ }
+      logLine('mailbox pull restored machine config: ' + restored.join(',') + ' city=' + (carried.city || ''));
+    }
+    const agg = store.aggregate(rangeToBounds('all'));
+    const st = achStore.refresh(agg);
+    logLine('mailbox pull ok: added=' + imp.added + ' merged=' + imp.merged + ' mailId=' + r.mailId);
+    res.json({
+      ok: true,
+      result: { ...imp, days: store.listDates().length, achievements: st },
+      cloudConfig,
+      mailId: r.mailId,
+      cfgAvailable: Boolean(imp.cfg),
+      restoredKeys: restored,
+      keyRestored: !hadKey && Boolean(config.amapKey),
+      hasKey: Boolean(config.amapKey),
+    });
   }).catch((e) => res.json({ ok: false, error: e && e.message ? e.message : String(e) }));
 });
 
@@ -705,6 +874,47 @@ app.post('/api/mailbox/restore-config', (req, res) => {
     saveConfig(config);
     logLine('machine config restored from mailbox: key=' + Boolean(cloud.amapKey) + ' smtp=' + Boolean(cloud.mailSmtpHost));
     res.json({ ok: true, restored: Object.keys(cloud), hasKey: Boolean(config.amapKey) });
+  }).catch((e) => res.json({ ok: false, error: e && e.message ? e.message : String(e) }));
+});
+
+/** 清理旧存档邮件：只保留最新一封，其余 NetWalk 邮件删除（收件箱被塞满时的自助整理） */
+app.post('/api/mailbox/cleanup', (req, res) => {
+  mailbox.cleanupMailbox(config, logLine).then((r) => res.json(r)).catch((e) => res.json({ ok: false, error: e && e.message ? e.message : String(e) }));
+});
+
+// 邮箱里到底有没有存档？——给设置页做「存档状态」指示灯，一眼看出能不能换设备续档
+app.get('/api/mailbox/status', (req, res) => {
+  const smtpConfigured = mailConfigured(config);
+  if (!mailbox.imapConfigured(config)) {
+    return res.json({ ok: true, imapConfigured: false, smtpConfigured, hasArchive: false, count: 0, error: '未配置 IMAP（无法读取邮箱），填 imap.qq.com 后可用' });
+  }
+  mailbox.checkInbox(config, logLine).then((r) => {
+    res.json({
+      ok: Boolean(r.ok),
+      imapConfigured: true,
+      smtpConfigured,
+      hasArchive: Boolean(r.ok && r.count > 0),
+      count: r.ok ? r.count : 0,
+      error: r.ok ? null : (r.error || '读取邮箱失败'),
+    });
+  }).catch((e) => res.json({ ok: false, imapConfigured: true, smtpConfigured, hasArchive: false, count: 0, error: e && e.message ? e.message : String(e) }));
+});
+
+// 立即把当前存档码发到邮箱（用户手动「上传存档」用），返回真实发送结果
+app.post('/api/mailbox/push', (req, res) => {
+  if (!mailConfigured(config)) {
+    return res.json({ ok: false, error: '还没配好 SMTP（服务器 / 账号 / 授权码），无法发信' });
+  }
+  const to = archiveRecipient();
+  if (!to) return res.json({ ok: false, error: '还没填邮箱账号（config.mailUser 为空）' });
+  let code;
+  try {
+    code = exportArchive(store, achStore, config).code;
+  } catch (e) {
+    return res.json({ ok: false, error: '生成存档码失败：' + (e && e.message ? e.message : e) });
+  }
+  sendArchiveMail(config, to, code, logLine, machineConfigText(config)).then((r) => {
+    res.json(r && r.ok ? { ok: true, to } : { ok: false, error: (r && r.error) || '发送失败' });
   }).catch((e) => res.json({ ok: false, error: e && e.message ? e.message : String(e) }));
 });
 
@@ -737,7 +947,7 @@ app.get('/api/stats', (req, res) => {
 // ---------- 存档码 ----------
 app.post('/api/archive/export', (req, res) => {
   try {
-    const r = exportArchive(store, achStore);
+    const r = exportArchive(store, achStore, config);
     res.json({ ok: true, ...r });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -750,7 +960,51 @@ app.post('/api/archive/import', (req, res) => {
     const r = importArchive(code, store, achStore);
     const agg = store.aggregate();
     const st = achStore.refresh(agg);
-    res.json({ ok: true, ...r, days: store.listDates().length, achievements: st });
+    // r.cfg 只用于告诉前端「这个码里带了本机配置」，**不自动应用**（可能是别人的码）
+    res.json({
+      ok: true, ...r, days: store.listDates().length, achievements: st,
+      cfgAvailable: Boolean(r.cfg),
+      cfgKeys: r.cfg ? Object.keys(r.cfg) : [],
+    });
+  } catch (err) {
+    res.status(400).json({ ok: false, error: err.message });
+  }
+});
+
+/** 显式应用存档码里携带的本机配置（换设备时点一次，邮箱/地图 Key 全部恢复） */
+app.post('/api/archive/apply-config', (req, res) => {
+  try {
+    const code = (req.body && req.body.code) || '';
+    const payload = decodeArchive(code);
+    const cfg = pickCarryConfig(payload.cfg);
+    const keys = Object.keys(cfg);
+    if (!keys.length) return res.json({ ok: false, error: '这个存档码里没有携带本机配置（可能是旧版本生成的）' });
+    for (const k of keys) {
+      if (k === 'origin') continue;              // 对象型字段单独处理
+      config[k] = cfg[k];
+    }
+    if (cfg.origin && Number.isFinite(cfg.origin.lng) && Number.isFinite(cfg.origin.lat)) {
+      config.origin = { lng: cfg.origin.lng, lat: cfg.origin.lat };
+    }
+    saveConfig(config);
+    // 出发点变了 → 同步到旅行者档案，档案面板显示保持一致
+    try {
+      profileMod.updateOrigin({
+        city: config.city,
+        origin: config.originCustom ? config.origin : null,
+        originName: config.originCustom ? (config.originName || '') : '',
+      });
+    } catch (_) { /* 档案不存在就算了 */ }
+    logLine('machine config applied from archive code: ' + keys.join(','));
+    res.json({
+      ok: true, restored: keys,
+      hasKey: Boolean(config.amapKey),
+      smtpConfigured: mailConfigured(config),
+      imapConfigured: mailbox.imapConfigured(config),
+      city: config.city,
+      origin: config.origin,
+      originCustom: Boolean(config.originCustom),
+    });
   } catch (err) {
     res.status(400).json({ ok: false, error: err.message });
   }
@@ -967,6 +1221,15 @@ async function main() {
       const busyPort = PORT;
       probeNetWalk(busyPort).then((isSelf) => {
         if (isSelf) {
+          // 被「重启」拉起的新进程：占着端口的是正在退出的旧进程 —— 等它释放后重试，
+          // 绝不能像"双击重复启动"那样直接退出，否则新旧两个进程会互相谦让，最后谁都不在跑。
+          if (IS_RESTART && restartRetries < 30) {
+            restartRetries += 1;
+            handling = false;
+            logLine(`restart: port ${busyPort} 仍被旧进程占用，${restartRetries}/30 次重试…`);
+            setTimeout(() => server.listen(busyPort, '127.0.0.1', onListening), 400);
+            return;
+          }
           const url = `http://127.0.0.1:${busyPort}`;
           console.log('');
           console.log(`  NetWalk 已经在运行：${url}`);

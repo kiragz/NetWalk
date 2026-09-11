@@ -315,20 +315,17 @@
       });
     }
 
-    /** 地址 / 地点名 → 经纬度（供「选择出发点」的地址搜索使用） */
-    lookupAddress(address) {
+    /** 单次地理编码（内部用）：严格用 2 参数调用，与早期可用写法保持一致 */
+    _geocodeOnce(text, timeoutMs) {
       return new Promise((resolve) => {
-        const text = String(address || '').trim();
-        if (!text) return resolve({ error: '请输入地址或地点名' });
-        if (!this._ready) return resolve({ error: '地图尚未就绪，请稍后再试' });
-        if (!this._charge('geocode')) return resolve({ error: '已达今日高德调用上限，明天再试或直接在地图上点选' });
         let done = false;
         const finish = (v) => { if (!done) { done = true; clearTimeout(timer); resolve(v); } };
-        const timer = setTimeout(() => finish({ error: '地址解析超时，请换个更具体的说法' }), 8000);
+        const timer = setTimeout(() => finish({ error: '__TIMEOUT__' }), timeoutMs);
         try {
           this.geocoder.getLocation(text, (status, result) => {
+            const info = result && result.info ? String(result.info) : '';
             if (status !== 'complete' || !result || !result.geocodes || !result.geocodes.length) {
-              return finish({ error: '没有找到这个地点' });
+              return finish({ error: info ? `高德返回「${info}」` : '没有找到这个地点' });
             }
             const g = result.geocodes[0];
             const loc = g.location;
@@ -343,6 +340,28 @@
           finish({ error: (err && err.message) || '地址解析失败' });
         }
       });
+    }
+
+    /**
+     * 地址 / 地点名 → 经纬度（供「选择出发点」的地址搜索使用）
+     * 超时放宽到 15 秒并自动重试一次；失败时带出高德返回的真实原因。
+     */
+    async lookupAddress(address) {
+      const text = String(address || '').trim();
+      if (!text) return { error: '请输入地址或地点名' };
+      if (!this._ready) return { error: '地图尚未就绪，请稍后再试' };
+
+      for (let attempt = 1; attempt <= 2; attempt++) {
+        if (!this._charge('geocode')) return { error: '已达今日高德调用上限，明天再试或直接在地图上点选' };
+        const r = await this._geocodeOnce(text, 15000);
+        if (r.error !== '__TIMEOUT__') return r;   // 有明确结果（成功或报错）立即返回
+        if (attempt === 2) {
+          return {
+            error: '地址解析超时（已重试一次）。常见原因：① 安全密钥不对或你的 Key 没开「静态安全密钥」——可在设置里点「清除安全密钥」再试；② 网络较慢。也可以直接点「在地图上点选」',
+          };
+        }
+      }
+      return { error: '地址解析失败' };
     }
 
     /** 进入「点地图选点」模式 */

@@ -126,7 +126,7 @@ win.fetch = function (url, opt) {
   if (u.indexOf('/api/stats') === 0) return json({ ok: true, range: 'day', from: TODAY, to: TODAY, agg: FAKE_AGG });
   if (u.indexOf('/api/archive/export') === 0) return json({ ok: true, code: 'NW1.' + 'A'.repeat(300), days: 3, bytes: 7080, rawBytes: 44764 });
   if (u.indexOf('/api/archive/import') === 0) return json({ ok: true, added: 1, merged: 2, days: 4, achievements: { newly: [], unlocked: {}, total: 36, got: 4 } });
-  if (u.indexOf('/api/session/') === 0) return json({ ok: true, date: TODAY, achievements: { newly: ['dist_5k'], unlocked: {}, total: 36, got: 4 } });
+  if (u.indexOf('/api/session/') === 0) return json({ ok: true, date: TODAY, achievements: { newly: ['dist_5k'], unlocked: {}, total: 36, got: 5 } });
   if (u.indexOf('/api/report/') === 0) return json({ ok: true, url: '/reports/netwalk-' + TODAY + '.html' });
   if (u.indexOf('/api/mapkey') === 0) return json({ ok: true, key: '' });
   return json({ ok: true });
@@ -196,6 +196,9 @@ const shown = (id) => $(id).classList.contains('show');
   if (spdTab) { spdTab.dispatchEvent(new win.MouseEvent('click', { bubbles: true })); await sleep(80); }
   ok('分组切换后可渲染', $('achBody').innerHTML.indexOf('<svg') >= 0);
   ok('已解锁数量 > 0', win.NetWalkAch.evaluate(FAKE_AGG).length > 0);
+  // 回归：成就红点看过就该熄灭（0.9.6 之前一旦点亮永不消失）
+  ok('打开成就墙后红点熄灭', !$('achDot').classList.contains('on'),
+    'achDot=' + ($('achDot').classList.contains('on') ? 'on' : 'off'));
   $('btnAchClose').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
   ok('成就弹窗可关闭', !shown('maskAch'));
 
@@ -366,6 +369,22 @@ const shown = (id) => $(id).classList.contains('show');
   ok('成就解锁已写入日志', $('logList').textContent.indexOf('解锁成就') >= 0);
   ok('achDot 已点亮', $('achDot').classList.contains('on'));
 
+  // 结束面板：发送存档到邮箱（新增）
+  ok('结束面板有「发送到邮箱」按钮', !!$('btnDoneMail'));
+  $('btnDoneMail').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(200);
+  ok('点「发送到邮箱」调用 /api/mailbox/push', calls.some((c) => c.indexOf('/api/mailbox/push') >= 0));
+  ok('发送后有结果提示', (($('doneHint') || {}).textContent || '').length > 0, ($('doneHint') || {}).textContent);
+
+  // 结束面板：打开今日日报（修复：不再"点了没反应"）
+  let openedUrl = null;
+  const origWinOpen = win.open;
+  win.open = (u) => { openedUrl = u; return null; };
+  $('btnOpenReport').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(300);
+  ok('点「打开今日日报」能打开日报 URL', typeof openedUrl === 'string' && openedUrl.indexOf('/reports/') >= 0, String(openedUrl));
+  win.open = origWinOpen;
+
   // Esc 关闭
   console.log('\n== K. 全局 Esc 与错误检查 ==');
   $('btnStats').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
@@ -485,6 +504,10 @@ const shown = (id) => $(id).classList.contains('show');
 
   ok('初始出发点=城市中心 · 深圳', $('orCurName').textContent === '城市中心 · 深圳', $('orCurName').textContent);
   ok('初始坐标=深圳市中心', $('orCurCoord').textContent === '114.057868, 22.543099', $('orCurCoord').textContent);
+  // 回归：出发点控件不能被锁死（否则"重置后无法重新选择出发点"）
+  ok('出发点控件始终可用（搜索/点选/定位/回中心）',
+    ['orSearch', 'btnOrSearch', 'btnOrPick', 'btnOrGeo', 'btnOrReset'].every((i) => $(i) && !$(i).disabled),
+    ['orSearch', 'btnOrSearch', 'btnOrPick', 'btnOrGeo', 'btnOrReset'].filter((i) => $(i) && $(i).disabled).join(','));
 
   // Key 说明与防泄露提示
   const setHtml = $('maskSettings').innerHTML;
@@ -586,7 +609,12 @@ const shown = (id) => $(id).classList.contains('show');
   ok('保存载荷标记 originCustom=true', !!saved && saved.originCustom === true, saved && String(saved.originCustom));
   ok('保存载荷带 originName', !!saved && typeof saved.originName === 'string' && saved.originName.length > 0,
     saved && saved.originName);
-  ok('保留 Key/安全密钥字段', !!saved && 'amapKey' in saved && 'amapSecurityJsCode' in saved);
+  // 0.9.1 起的契约：没有可用 Key 时【不下发】amapKey（下发空串会把已配置的 Key 清掉，
+  // 表现为"保存设置后地图变虚拟路网"）。所以这里断言"绝不下发空串"。
+  ok('保存绝不把 Key 清成空串（不下发即保持原值）',
+    !!saved && (!('amapKey' in saved) || String(saved.amapKey || '').length > 0)
+    && (!('amapSecurityJsCode' in saved) || String(saved.amapSecurityJsCode || '').length > 0),
+    saved && JSON.stringify({ amapKey: saved.amapKey, sec: saved.amapSecurityJsCode }));
   ok('M 阶段无运行时错误', errors.length === 0, errors.slice(0, 2).join(' | '));
 
   // N. 走出广州 / 走出中国（大尺度推进：路网规划失败时走直线兜底）

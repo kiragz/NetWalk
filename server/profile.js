@@ -93,6 +93,24 @@ function register({ name, email, city, origin, originName }) {
   return p;
 }
 
+/**
+ * 只更新档案里的出发点（不触碰漫游数据）。
+ * 用户在「设置 → 出发点」改了位置并保存时调用，保证档案面板显示与实际一致。
+ * origin 传 null 表示改回城市中心。
+ */
+function updateOrigin({ city, origin, originName } = {}) {
+  const p = load();
+  if (!p) return null;
+  if (city) p.city = String(city).slice(0, 24);
+  if (origin === null) p.origin = null;
+  else if (origin && Number.isFinite(Number(origin.lng)) && Number.isFinite(Number(origin.lat))) {
+    p.origin = { lng: Number(origin.lng), lat: Number(origin.lat) };
+  }
+  if (originName !== undefined) p.originName = String(originName || '').slice(0, 40);
+  save(p);
+  return p;
+}
+
 /** 重置：清档案 + 清全部漫游数据（store 由调用方 forgetAll / 成就由调用方 reset） */
 function resetAll({ name, city, origin, originName } = {}) {
   try { fs.rmSync(FILE, { force: true }); } catch (_) { /* noop */ }
@@ -108,4 +126,4 @@ function resetAll({ name, city, origin, originName } = {}) {
   return null;
 }
 
-module.exports = { load, save, exists, sendCode, verifyCode, register, resetAll, maskEmail, RESET_PHRASE };
+module.exports = { load, save, exists, sendCode, verifyCode, register, updateOrigin, resetAll, maskEmail, RESET_PHRASE };

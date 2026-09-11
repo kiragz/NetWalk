@@ -204,6 +204,25 @@ class TrackStore {
   }
 
   /**
+   * 全局重排出发序号：把所有日期的出发记录按时间排序后重新编号 1..N。
+   * 多设备同步合并后，各设备各自的序号都从 1 开始会互相冲突，
+   * 必须全局重排，两台设备的「第 N 次出发」才能对得上；重排后最大值就是总次数。
+   */
+  renumberSessions() {
+    const all = [];
+    for (const d of this.listDates()) {
+      const data = this.load(d);
+      if (!Array.isArray(data.sessions) || !data.sessions.length) continue;
+      for (const s of data.sessions) all.push({ date: d, s });
+    }
+    if (!all.length) return 0;
+    all.sort((a, b) => (Number(a.s.t) || 0) - (Number(b.s.t) || 0));
+    all.forEach((x, i) => { x.s.n = i + 1; this.markDirty(x.date); });
+    this.flush();
+    return all.length;
+  }
+
+  /**
    * 全局聚合指标（用于成就判定与日/月/年统计）
    * @param {{from?:string,to?:string}} range 日期闭区间，缺省表示全部
    */
@@ -347,6 +366,9 @@ class TrackStore {
     cur.path = dedupe(cur.path || [], incoming.path);
     cur.rolls = dedupe(cur.rolls || [], incoming.rolls);
     cur.samples = dedupe(cur.samples || [], incoming.samples);
+    // 出发记录也要合并：否则另一台设备上"第 7、8 次出发"同步过来就丢了，
+    // 本机还停留在自己的 3、4 —— 两台设备的出发次数对不上。
+    cur.sessions = dedupe(cur.sessions || [], incoming.sessions);
     if (incoming.stats) {
       if (!cur.stats || (incoming.stats.distance || 0) > (cur.stats.distance || 0)) cur.stats = incoming.stats;
     }

@@ -11,14 +11,29 @@ const { spawn } = require('child_process');
 const fs = require('fs');
 const os = require('os');
 const path = require('path');
+const net = require('net');
 
 const IS_WIN = process.platform === 'win32';
 const PROJECT_ROOT = path.resolve(__dirname, '..');
-const PORT = Number(process.env.NETWALK_E2E_PORT) || 8788;
+// 0 = 运行时自动挑一个空闲端口，避免被上一轮遗留的实例占住 8788 后，
+// 测试打到旧数据上（表现为"合并后轨迹翻倍 n=120/180"这种假故障）。
+let PORT = Number(process.env.NETWALK_E2E_PORT) || 0;
 
 let child = null;
 let tmpData = null;
 let B = process.env.NETWALK_BASE || '';
+
+/** 问操作系统要一个当前空闲的端口 */
+function freePort() {
+  return new Promise((resolve, reject) => {
+    const s = net.createServer();
+    s.once('error', reject);
+    s.listen(0, '127.0.0.1', () => {
+      const p = s.address().port;
+      s.close(() => resolve(p));
+    });
+  });
+}
 
 let pass = 0, fail = 0;
 function ok(n, c, e) { c ? (pass++, console.log('  [OK]   ' + n)) : (fail++, console.log('  [FAIL] ' + n + (e !== undefined ? ' → ' + e : ''))); }
@@ -61,6 +76,7 @@ function cleanup() {
 
 async function main() {
   if (!B) {
+    if (!PORT) PORT = await freePort();
     tmpData = path.join(os.tmpdir(), `netwalk-e2e-${process.pid}`);
     fs.rmSync(tmpData, { recursive: true, force: true });
     B = `http://127.0.0.1:${PORT}`;
@@ -93,6 +109,11 @@ async function main() {
   const cfg = await J('/api/config');
   ok('config 返回城市', !!cfg.city, cfg.city);
   ok('config 不泄露明文 Key', cfg.amapKey === '' || cfg.amapKey === '***configured***', cfg.amapKey);
+  const sc = await J('/api/selfcheck');
+  ok('自检页可用且含关键字段',
+    sc.ok === true && typeof sc.pid === 'number' && typeof sc.smtpConfigured === 'boolean' && typeof sc.imapConfigured === 'boolean' && !!sc.dataDir,
+    JSON.stringify({ pid: sc.pid, smtp: sc.smtpConfigured, imap: sc.imapConfigured }));
+  ok('自检页不泄露密钥明文', !JSON.stringify(sc).match(/[0-9a-f]{32}|(pass|token|code)"\s*:\s*"[^"]{8,}/i), '');
   const home = await fetch(B + '/');
   const homeHtml = await home.text();
   ok('首页可访问且含全部脚本', home.status === 200 && homeHtml.includes('/js/achievements.js') && homeHtml.includes('/js/share.js'));
@@ -178,6 +199,57 @@ async function main() {
   console.log('\n== 9. 合并后轨迹不翻倍 ==');
   const day2 = await J('/api/day/' + today);
   ok('合并后轨迹点未翻倍', day2.path.length < 120, 'n=' + day2.path.length);
+
+  console.log('\n== 10. 高德安全密钥防误填 ==');
+  // 回归：安全密钥被填成和高德 Key 一样 → 高德签名失败 → 地址解析一直超时
+  await post('/api/config', { amapKey: 'TESTKEY123456', amapSecurityJsCode: 'TESTKEY123456' });
+  const mk1 = await J('/api/mapkey');
+  ok('安全密钥与 Key 相同时被忽略', mk1.key === 'TESTKEY123456' && mk1.securityJsCode !== 'TESTKEY123456',
+    JSON.stringify(mk1));
+  await post('/api/config', { amapKey: 'TESTKEY123456', amapSecurityJsCode: 'REAL_SEC_999' });
+  const mk2 = await J('/api/mapkey');
+  ok('安全密钥与 Key 不同时正常保存', mk2.securityJsCode === 'REAL_SEC_999', JSON.stringify(mk2));
+
+  console.log('\n== 11. 存档码携带本机配置（换设备免手填） ==');
+  await post('/api/config', {
+    amapKey: 'CARRYKEY_AAA', amapSecurityJsCode: 'CARRYSEC_BBB',
+    mailSmtpHost: 'smtp.qq.com', mailSmtpPort: '465', mailUser: 'carry@qq.com', mailPass: 'pw123',
+    mailImapHost: 'imap.qq.com', mailImapPort: '993',
+    city: '广州', origin: { lng: 113.356426, lat: 23.135343 }, originCustom: true, originName: '测试出发点',
+  });
+  const exp = await post('/api/archive/export', {});
+  ok('导出成功且带出配置字段', exp.ok === true && !!exp.code);
+  // 把本机配置改掉，模拟"新设备"上的另一套配置
+  await post('/api/config', { amapKey: 'OTHERKEY_CCC', mailUser: 'other@qq.com' });
+  const imp = await post('/api/archive/import', { code: exp.code });
+  ok('导入后提示存档码带配置', imp.ok === true && imp.cfgAvailable === true && imp.cfgKeys.indexOf('amapKey') >= 0, JSON.stringify(imp.cfgKeys));
+  const mkAfterImport = await J('/api/mapkey');
+  ok('导入不会自动覆盖本机配置（安全）', mkAfterImport.key === 'OTHERKEY_CCC', mkAfterImport.key);
+  const applied = await post('/api/archive/apply-config', { code: exp.code });
+  ok('显式应用后配置被恢复', applied.ok === true && applied.restored.indexOf('amapKey') >= 0, JSON.stringify(applied.restored));
+  ok('出发点也随存档码恢复（不再跳回默认城市）',
+    applied.ok === true && applied.city === '广州' && applied.originCustom === true
+    && Math.abs(Number(applied.origin.lng) - 113.356426) < 1e-6,
+    JSON.stringify({ city: applied.city, origin: applied.origin, custom: applied.originCustom }));
+  const mkAfterApply = await J('/api/mapkey');
+  ok('恢复生效：Key / 邮箱都回来了',
+    mkAfterApply.key === 'CARRYKEY_AAA' && mkAfterApply.securityJsCode === 'CARRYSEC_BBB', JSON.stringify(mkAfterApply));
+  const applied2 = await post('/api/archive/apply-config', { code: 'NW1.bogus' });
+  ok('非法存档码应用配置被拒绝', applied2.ok === false && !!applied2.error);
+
+  console.log('\n== 12. 出发次数合并与全局重排 ==');
+  // 本机先出发 3 次（n=1,2,3）→ 导出存档 → 本机又出发 2 次（n=4,5）→ 导入存档（模拟另一台设备的数据回来）
+  // 合并后出发记录应去重并全局重排为 1..5，下一次出发 = 6
+  for (let i = 0; i < 3; i++) await post('/api/session/start', { date: today, city: '深圳', scope: 'city', lat: 22.54 + i * 0.001, lng: 114.05 + i * 0.001 });
+  const expS = await post('/api/archive/export', {});
+  for (let i = 0; i < 2; i++) await post('/api/session/start', { date: today, city: '深圳', scope: 'city', lat: 22.55 + i * 0.001, lng: 114.06 + i * 0.001 });
+  const impS = await post('/api/archive/import', { code: expS.code });
+  const ss = await J('/api/sessions');
+  const ns = (ss.starts || []).map((x) => x.n).sort((a, b) => a - b);
+  ok('导入后出发记录被合并（不丢）', (ss.starts || []).length === 5, 'count=' + (ss.starts || []).length);
+  ok('出发序号全局重排为 1..N', ns.join(',') === '1,2,3,4,5', ns.join(','));
+  const sn = await post('/api/session/start', { date: today, city: '深圳', scope: 'city', lat: 22.57, lng: 114.07 });
+  ok('下一次出发序号 = 总次数 + 1', sn.sessionNo === 6, 'sessionNo=' + sn.sessionNo);
 
   console.log(`\n===== 端到端结果：${pass} 通过 / ${fail} 失败 =====\n`);
   return fail ? 1 : 0;

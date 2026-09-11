@@ -170,6 +170,14 @@ p.planRoute(from, { lat: far.lat, lng: far.lng }).then(async (route) => {
   ok(s2.get('2026-09-10').path.length === track.length, '重复导入未产生重复点');
   try { importArchive('THIS_IS_NOT_A_CODE', s2, a2); ok(false, '非法存档码应报错'); }
   catch (_) { ok(true, '非法存档码被拒绝'); }
+  // 契约：importArchive 不返回 ok 字段（调用方别写 Boolean(imp.ok)，否则成功也判失败）
+  ok(imp.ok === undefined && typeof imp.added === 'number', 'importArchive 不返回 ok 字段（调用方按异常判断成败）');
+  // 存档码可携带本机配置，且导入时不自动应用
+  const exp2 = exportArchive(s1, a1, { amapKey: 'K1', mailUser: 'u@qq.com', mailPass: 'p' });
+  const imp3 = importArchive(exp2.code, s2, a2);
+  ok('存档码能携带本机配置', imp3.cfg && imp3.cfg.amapKey === 'K1' && imp3.cfg.mailPass === 'p', JSON.stringify(imp3.cfg));
+  ok('导出的存档码未带配置时 cfg 为 null',
+    importArchive(exp.code, s2, a2).cfg === null);
   try { importArchive('NW2.abcdef', s2, a2); ok(false, '错误前缀应报错'); }
   catch (_) { ok(true, '错误前缀被拒绝'); }
 
@@ -238,6 +246,27 @@ p.planRoute(from, { lat: far.lat, lng: far.lng }).then(async (route) => {
 
   s1.dispose(); s2.dispose();
   rmBestEffort(SMOKE_DIR);
+
+  // ---------- 邮箱正文解码（一键同步"找不到存档码"的根治点） ----------
+  console.log('\n== N. 邮箱正文解码与存档码提取 ==');
+  const mailbox = require(path.join(__dirname, 'mailbox'));
+  const CODE = 'NW1.' + 'AbCdEfGhIjKlMnOpQrStUvWxYz0123456789_-'.repeat(2);   // 合法 base64url 形态
+  const plainMail = 'NetWalk 存档码\r\n\r\n----- 存档码开始 -----\r\n' + CODE + '\r\n----- 存档码结束 -----\r\nmailUser=x@qq.com';
+  const b64 = Buffer.from(plainMail, 'utf8').toString('base64').replace(/(.{76})/g, '$1\r\n');
+  const fetchResp = '* 42 FETCH (BODY[TEXT] {' + Buffer.byteLength(b64, 'utf8') + '}\r\n' + b64 + ')\r\nNW5 OK FETCH completed';
+
+  ok('明文正文可直接提取存档码', mailbox.extractCode(plainMail) === CODE);
+  ok('base64 密文直接提取会失败（复现旧 bug）', mailbox.extractCode(b64) === null);
+  ok('decodeBody 能把 base64 正文解回明文',
+    mailbox.decodeBody(fetchResp).indexOf('存档码开始') >= 0, mailbox.decodeBody(fetchResp).slice(0, 24));
+  const ex = mailbox.extractCodeFromFetch(fetchResp);
+  ok('extractCodeFromFetch 能从 base64 邮件里取出存档码', ex.code === CODE, ex.code);
+  ok('非 base64 的普通正文原样返回', mailbox.decodeBody('* 7 FETCH (BODY[TEXT] {11}\r\nhello world)\r\nNW5 OK') === 'hello world');
+  ok('没有存档码时 extractCodeFromFetch 返回 null',
+    mailbox.extractCodeFromFetch('* 9 FETCH (BODY[TEXT] {5}\r\nhello)\r\nNW5 OK').code === null);
+  // verify码邮件（也有 NetWalk 主题，但不含存档码）不能被误当成存档
+  const codeMail = '你的 NetWalk 登录验证码是：123456';
+  ok('验证码邮件不会被误认成存档', mailbox.extractCode(codeMail) === null);
 
   console.log(`\n===== 结果：${pass} 通过 / ${fail} 失败 =====\n`);
   process.exit(fail ? 1 : 0);
