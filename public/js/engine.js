@@ -383,8 +383,14 @@
             this.bearing = d.bearing;
             this.onLog(`前方不通，原路返回路口 ROLL ${roll} → ${d.choice}`);
             const target = destPoint(this.pos, d.bearing, d.distance * scale);
-            route = await this._planRouteSafe(this.pos, target, 4000)
-              || this._straightRoute(d.bearing, Math.max(120, d.distance * scale));
+            const r2 = await this._planRouteSafe(this.pos, target, 4000);
+            if (r2) {
+              route = r2;
+            } else {
+              // 直线兜底要明说：否则用户只看到"分身不沿路走"却不知道原因
+              this.onLog('⚠ 规划不可用（调用达上限 / 超时 / 前方无路），本段直线推进');
+              route = this._straightRoute(d.bearing, Math.max(120, d.distance * scale));
+            }
           } else {
             // 退无可退（栈空或连续受阻）：随机大转向强行推进
             this.blockedStreak = 0;
@@ -392,7 +398,7 @@
             roll = 1 + Math.floor(Math.random() * 100);
             d = rollJunction(roll, this.bearing + 120 + Math.random() * 120);
             this.bearing = d.bearing;
-            this.onLog(`附近无路可走，转向 ${d.choice}`);
+            this.onLog(`附近无路可走，本段直线推进（转向 ${d.choice}）`);
             route = this._straightRoute(d.bearing, Math.max(150, d.distance * scale));
           }
           freshRatio = 0;

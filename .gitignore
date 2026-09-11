@@ -12,8 +12,8 @@ data/*
 .tmp_*
 *.log
 *.out
-x.txt
-zz.txt
+# 根目录的诊断输出 txt（PowerShell Out-File 调试残留），一劳永逸全部忽略
+/*.txt
 .workbuddy/
 .DS_Store
 Thumbs.db

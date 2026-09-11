@@ -270,11 +270,15 @@
             const steps = [];
             for (const st of (route.steps || [])) {
               for (const p of (st.path || [])) pts.push({ lng: p.lng, lat: p.lat });
-              if (st.road) {
-                const last = steps[steps.length - 1];
-                if (last && last.road === st.road) last.distance += st.distance || 0;
-                else steps.push({ road: st.road, distance: st.distance || 0 });
-              }
+              // 关键：没有路名的步骤也必须计入 steps！
+              // 以前直接跳过，导致 steps 的累计里程与折线几何错位 ——
+              // 分身走在 A 路上，界面却显示 B 路（"走的路显示不对"的根因）。
+              // 没有路名的步骤（高架引道 / 匝道 / 连接线）用空字符串占位，
+              // 引擎遇到空路名会沿用上一个路名显示。
+              const road = st.road || '';
+              const last = steps[steps.length - 1];
+              if (last && last.road === road) last.distance += st.distance || 0;
+              else steps.push({ road, distance: st.distance || 0 });
             }
             if (pts.length < 2) return finish(null);
             finish({ points: pts, steps, distance: route.distance || 0 });

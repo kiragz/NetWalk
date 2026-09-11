@@ -155,6 +155,9 @@ class TrackStore {
       roll: Number(r.roll) || 0,
       choice: r.choice || '',
       bearing: Number(r.bearing) || 0,
+      // 新路占比 / 是否原路返回：诊断"为什么老走同一条路"用
+      fresh: (r.fresh === undefined || r.fresh === null) ? undefined : Number(r.fresh),
+      backtrack: Boolean(r.backtrack),
     });
     this.markDirty(date);
     return data.rolls.length;
