@@ -207,6 +207,37 @@ class TrackStore {
   }
 
   /**
+   * 重置时间戳（持久化在数据目录根部，随存档码传播；0 = 从未重置过）。
+   * 重置语义：本机 resetAt 之后的轨迹才是有效数据；同步时双方比较 resetAt，
+   * 更晚的重置会"接管"更早的设备（清空其旧轨迹并采用接管方的数据）。
+   */
+  _resetFile() { return path.join(path.dirname(this.dir), 'reset.json'); }
+  getResetAt() {
+    try { return Number(JSON.parse(fs.readFileSync(this._resetFile(), 'utf8')).t) || 0; }
+    catch (_) { return 0; }
+  }
+  setResetAt(t) {
+    const f = this._resetFile();
+    try {
+      fs.mkdirSync(path.dirname(f), { recursive: true });
+      fs.writeFileSync(f, JSON.stringify({ t: Number(t) || Date.now() }), 'utf8');
+    } catch (_) { /* 写不进就算了，重置标记只影响同步 */ }
+  }
+
+  /** 清空全部日期的轨迹数据（覆写为空结构），供"重置接管"使用 */
+  clearAllDays() {
+    for (const d of this.listDates()) {
+      try {
+        fs.writeFileSync(path.join(this.dir, d + '.json'), JSON.stringify({
+          date: d, startedAt: Date.now(), endedAt: null, city: '',
+          path: [], samples: [], rolls: [], sessions: [], stats: null,
+        }), 'utf8');
+      } catch (_) { /* 忽略单个日期的失败 */ }
+    }
+    this.forgetAll();
+  }
+
+  /**
    * 全局重排出发序号：把所有日期的出发记录按时间排序后重新编号 1..N。
    * 多设备同步合并后，各设备各自的序号都从 1 开始会互相冲突，
    * 必须全局重排，两台设备的「第 N 次出发」才能对得上；重排后最大值就是总次数。

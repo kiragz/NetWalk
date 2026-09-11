@@ -12,6 +12,7 @@ const fs = require('fs');
 const os = require('os');
 const path = require('path');
 const net = require('net');
+const zlib = require('zlib');
 
 const IS_WIN = process.platform === 'win32';
 const PROJECT_ROOT = path.resolve(__dirname, '..');
@@ -250,6 +251,37 @@ async function main() {
   ok('出发序号全局重排为 1..N', ns.join(',') === '1,2,3,4,5', ns.join(','));
   const sn = await post('/api/session/start', { date: today, city: '深圳', scope: 'city', lat: 22.57, lng: 114.07 });
   ok('下一次出发序号 = 总次数 + 1', sn.sessionNo === 6, 'sessionNo=' + sn.sessionNo);
+
+  console.log('\n== 13. 重置传播：按时间戳过滤 + 接管 ==');
+  // 本机走一个"旧世界"的点 → 导出（resetAt=0）→ 重置（记录 resetAt=T1）→ 再导入旧存档：
+  // 旧点的时间戳全部早于重置时刻，应被逐点过滤，一条也回不来
+  await post('/api/track/path', { date: today, points: [ { t: Date.now() - 60000, lat: 22.54, lng: 114.05, road: '旧路', spd: 5, mode: 'walk' } ] });
+  const expOld = await post('/api/archive/export', {});
+  const pr13 = await post('/api/profile/reset', { confirm: '我已知重置将删除全部漫游数据且不可恢复', city: '深圳' });
+  ok('13.1 档案重置成功（已记录重置时间戳）', pr13.ok === true);
+  const impOld = await post('/api/archive/import', { code: expOld.code });
+  const rng13 = await J('/api/track/range?from=0000-01-01&to=' + today);
+  const pts13 = (rng13.days || []).reduce((s, d) => s + (d.path || []).length, 0);
+  ok('13.2 重置后导入旧存档：旧轨迹点按时间戳过滤，不会回来', pts13 === 0, 'points=' + pts13 + ' (added=' + impOld.added + ')');
+
+  // 构造一个"对端重置得更晚（resetAt=T2）"的存档 → 导入应触发接管：清空本机旧轨迹并采用对端数据
+  const T2 = Date.now();
+  const payload13 = {
+    v: 1, at: T2, resetAt: T2,
+    tracks: { [today]: { date: today, startedAt: T2, endedAt: null, city: '广州',
+      path: [ { t: T2 + 1000, lat: 23.13, lng: 113.35, road: '新路', spd: 5, mode: 'walk' } ],
+      samples: [], rolls: [], sessions: [ { n: 1, lat: 23.13, lng: 113.35, t: T2 + 500 } ], stats: null } },
+    achievements: { unlocked: {} },
+  };
+  const codeT2 = 'NW1.' + zlib.deflateRawSync(Buffer.from(JSON.stringify(payload13), 'utf8')).toString('base64url');
+  const impT2 = await post('/api/archive/import', { code: codeT2 });
+  ok('13.3 对端重置更新 → 触发接管', impT2.resetTakeover === true, JSON.stringify(impT2).slice(0, 100));
+  const rng13b = await J('/api/track/range?from=0000-01-01&to=' + today);
+  const flat13 = (rng13b.days || []).flatMap((d) => d.path || []);
+  ok('13.4 接管后本机只剩对端的新数据', flat13.length === 1 && Math.abs(Number(flat13[0].lat) - 23.13) < 1e-6,
+    'points=' + flat13.length);
+  const ss13 = await J('/api/sessions');
+  ok('13.5 出发记录也随接管更新为对端的', (ss13.starts || []).length === 1, 'starts=' + (ss13.starts || []).length);
 
   console.log(`\n===== 端到端结果：${pass} 通过 / ${fail} 失败 =====\n`);
   return fail ? 1 : 0;

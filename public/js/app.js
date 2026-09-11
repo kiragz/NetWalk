@@ -754,6 +754,7 @@
       res.ok = true;
       res.days = (mp.result && mp.result.days) || 0;
       res.pulled = '存档 ' + res.days + ' 天';
+      if (mp.result && mp.result.resetTakeover) res.takeover = true;
       if (mp.keyRestored) res.keyRestored = true;
       // 明确告诉用户接下来会从哪里继续（跨设备同步后尤其重要，不然不知道有没有同步对）
       try {
@@ -1778,26 +1779,13 @@
       return s || '未知错误';
     }
         // 一键同步：恢复邮箱里保存的配置 + 拉回最新存档码（登录账号 / 换设备时用）
-    let syncConfirmArmed = false, syncConfirmTimer = null;
     el.btnSync.addEventListener('click', async () => {
       const btn = el.btnSync;
       const old = btn.innerHTML;
-      // 本机重置过数据 → 同步前必须二次确认：
-      // 邮箱里的存档来自另一台未重置的设备，直接合并会把旧轨迹混进重置后的新线路
-      if (!syncConfirmArmed && localStorage.getItem('netwalkNoAutoSync') === '1') {
-        syncConfirmArmed = true;
-        btn.textContent = '确认合并旧数据？';
-        log('⚠ 你在本机重置过数据。现在同步会把邮箱里的旧存档（另一台设备的全部历史轨迹）合并回来，重置后的新线路会被旧轨迹污染。');
-        log('　· 只想恢复配置（高德 Key / 邮箱 / 出发点）→ ⚙ 设置 → 📮 邮件服务 → 「📥 从邮箱恢复配置」');
-        log('　· 确定要把旧数据合并回来 → 再点一次「同步」');
-        clearTimeout(syncConfirmTimer);
-        syncConfirmTimer = setTimeout(() => { syncConfirmArmed = false; btn.innerHTML = old; }, 12000);
-        return;
-      }
-      syncConfirmArmed = false;
-      clearTimeout(syncConfirmTimer);
       btn.disabled = true; btn.textContent = '同步中…';
-      // 用户主动点同步 = 明确要把邮箱数据取回来，解除"重置后暂停自动同步"
+      // 用户主动点同步 = 明确要把邮箱数据取回来，解除"重置后暂停自动同步"。
+      // 重置过的设备也不怕：导入时会按双方 resetAt 处理（对端更晚重置→接管本机；
+      // 本机更晚重置→对端重置前的点按时间戳全部过滤，旧轨迹不会回来）。
       try { localStorage.removeItem('netwalkNoAutoSync'); } catch (_) { /* noop */ }
       try {
         const r = await syncFromMailbox();
@@ -1806,6 +1794,7 @@
         if (r.ok) parts.push(r.pulled); else if (r.pulled) parts.push(r.pulled);
         log('🔄 一键同步：' + (parts.filter(Boolean).join('；') || '未完成'));
         if (!parts.filter(Boolean).length) log('同步未完成：请先在 ⚙ 设置 → 📮 配置邮件服务里填好 SMTP/IMAP 授权码');
+        if (r.takeover) log('♻ 已执行对端的重置标记：本机旧轨迹已全部清空，采用同步来的全新数据。');
         if (r.keyRestored) {
           log('已恢复高德 Key，正在重新加载以启用真实地图…');
           setTimeout(() => location.reload(), 1500);
@@ -2078,17 +2067,10 @@ el.btnReport.addEventListener('click', () => {
         log(j.createdHere
           ? `已在本机创建档案「${j.account.name}」（新设备首次登录），正在重启并同步…`
           : `已登录档案「${j.account.name}」，正在从邮箱同步数据…`);
-        // 重启完成（确认新 pid）后立刻一键同步：配置 + 该邮箱账号的存档
+        // 重启完成（确认新 pid）后立刻一键同步：配置 + 该邮箱账号的存档。
+        // 本机若重置过也不必特殊处理：导入按双方 resetAt 处理
+        // （对端更晚重置 → 接管本机；本机更晚重置 → 对端重置前的点按时间戳过滤）。
         restartForAccount(async () => {
-          // 本机重置过数据 → 登录后只恢复配置，不拉旧存档（避免旧轨迹污染重置后的新线路）
-          if (localStorage.getItem('netwalkNoAutoSync') === '1') {
-            el.accCodeHint.textContent = '正在恢复配置（本机重置过，不同步旧数据）…';
-            const rc = await syncFromMailbox({ skipData: true });
-            el.accCodeHint.textContent = '配置已恢复（' + (rc.restored || '0 项') + '）。'
-              + '本机重置过数据，未合并旧存档 —— 这样新线路是干净的。需要旧数据时点「同步」并确认。';
-            log('🔄 登录后同步：只恢复了配置，未拉取旧存档（本机重置过，避免污染新线路）。');
-            return;
-          }
           el.accCodeHint.textContent = '正在从邮箱同步数据与配置…';
           const r = await syncFromMailbox();
           if (r.keyRestored) {
@@ -2106,6 +2088,7 @@ el.btnReport.addEventListener('click', () => {
             ? ('同步完成 ✓ ' + parts.join('，') + '。' + tail)
             : '同步未完成：请先在 ⚙ 设置 → 📮 邮件服务 填好 SMTP/IMAP，再点「一键同步」。';
           log('🔄 登录后同步：' + (parts.join('；') || '未完成'));
+          if (r.takeover) log('♻ 已执行对端的重置标记：本机旧轨迹已全部清空，采用同步来的全新数据。');
         });
       } catch (e) { el.accCodeHint.textContent = '登录失败：' + netErr(e); }
     });

@@ -457,6 +457,7 @@ app.post('/api/account/reset', (req, res) => {
     return res.status(400).json({ ok: false, error: '请输入「重置」两个字确认' });
   }
   store.forgetAll();          // 先丢内存缓存，防止 8 秒 flush 把旧数据写回去
+  store.setResetAt(Date.now()); // 重置时间戳：随存档码传播，其他设备同步时据此清空自己的旧轨迹
   logLine(`reset diag: pid=${process.pid} cache=${store.cache.size} dirty=${store.dirty.size}`);
   let removed = 0;
   try {
@@ -744,6 +745,7 @@ app.post('/api/profile/reset', (req, res) => {
   // 顺序很重要：先清内存缓存（防止 8 秒 flush 把旧数据写回去），再清磁盘
   store.forgetAll();
   achStore.forgetAll();
+  store.setResetAt(Date.now());   // 重置时间戳：随存档码传播，其他设备同步时据此清空自己的旧轨迹
   // 清空「当前生效的数据目录」里的轨迹 —— 登录账号时就是账号目录（ACTIVE_DATA），
   // 否则是基础目录。profile.js 只清基础目录，账号模式下清不到，会「重置了数据还在」。
   // 注意：本机 fs.rmSync 被回收站 shim 重定向（可能删不干净），所以用「覆写清空」而不是删除。

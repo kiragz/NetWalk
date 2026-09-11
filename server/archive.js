@@ -44,6 +44,9 @@ function exportArchive(store, achStore, machineCfg) {
   const payload = {
     v: 1,
     at: Date.now(),
+    // 重置时间戳：随存档传播。其他设备同步时比较双方 resetAt ——
+    // 更晚的重置会接管更早的设备（清空其旧轨迹并采用本存档的数据）。
+    resetAt: store.getResetAt ? store.getResetAt() : 0,
     tracks,
     achievements: achStore ? achStore.data : { unlocked: {} },
   };
@@ -89,10 +92,51 @@ function decodeArchive(code) {
  */
 function importArchive(code, store, achStore) {
   const payload = decodeArchive(code);
+  // ---- 重置语义（0.9.10）：双方比较 resetAt，按时间戳决定谁说了算 ----
+  const incomingReset = Number(payload.resetAt) || 0;
+  const localReset = (store && store.getResetAt) ? store.getResetAt() : 0;
+  let takeover = false;
+  if (incomingReset > localReset) {
+    // 对端重置得更晚 → 对端的"从零开始"接管本机：清空本机全部旧轨迹与成就，
+    // 然后导入对端（只含重置后）的数据。这正是"重置通过存档传播到所有设备"。
+    if (store.clearAllDays) store.clearAllDays();
+    if (achStore) achStore.forgetAll();
+    if (store.setResetAt) store.setResetAt(incomingReset);
+    takeover = true;
+  } else if (localReset > incomingReset) {
+    // 本机重置得更晚 → 对端存档里重置之前的点全部按时间戳过滤掉，
+    // 旧轨迹绝不回到本机（这就是"同步还是有问题"的根治：过滤精确到每个点的时间戳）。
+    const cutoff = localReset;
+    const fday = (data) => {
+      if (!data || typeof data !== 'object') return data;
+      return {
+        ...data,
+        path: (data.path || []).filter((p) => Number(p && p.t) >= cutoff),
+        samples: (data.samples || []).filter((p) => Number(p && p.t) >= cutoff),
+        rolls: (data.rolls || []).filter((p) => Number(p && p.t) >= cutoff),
+        sessions: (data.sessions || []).filter((p) => Number(p && p.t) >= cutoff),
+      };
+    };
+    payload.tracks = Object.fromEntries(
+      Object.entries(payload.tracks || {}).map(([d, v]) => [d, fday(v)]),
+    );
+    if (payload.achievements && payload.achievements.unlocked) {
+      const u = {};
+      for (const [id, ts] of Object.entries(payload.achievements.unlocked)) {
+        if (Number(ts) >= cutoff) u[id] = ts;
+      }
+      payload.achievements.unlocked = u;
+    }
+  }
+
   let added = 0;
   let merged = 0;
   for (const [date, data] of Object.entries(payload.tracks)) {
     if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) continue;
+    // 重置过滤后可能变空的日期直接跳过，不生成"多余的路径"
+    const hasPts = (data && (data.path || []).length) || 0;
+    const hasSess = (data && (data.sessions || []).length) || 0;
+    if (!hasPts && !hasSess) continue;
     const cur = store.get(date);
     const curPoints = (cur && cur.path && cur.path.length) || 0;
     if (curPoints === 0) {
@@ -112,6 +156,7 @@ function importArchive(code, store, achStore) {
   const cfg = pickCarryConfig(payload.cfg);
   return {
     added, merged, total: added + merged, achievements: achCount,
+    resetTakeover: takeover,
     cfg: Object.keys(cfg).length ? cfg : null,
   };
 }
