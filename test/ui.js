@@ -624,13 +624,13 @@ const shown = (id) => $(id).classList.contains('show');
   const mkNull = (name) => { const p = mkProvider(name); p.isVirtual = false; p.planRoute = () => Promise.resolve(null); return p; };
 
   // 全国尺度 50×：前 3 次不通会先"原路返回路口重掷"（原地打转是预期行为），
-  // 第 4 次起退无可退 → 直线兜底狂奔，每段 ≈ 1000m × 50 = 50km
+  // 第 4 次起退无可退 → 直线兜底狂奔。0.9.8 起每段约 240-300m，30 段 × 270m × 50 ≈ 400km
   const eCn = new win.RoamEngine({
     provider: mkNull('CN_OUT'), cfg: {}, origin: GZ, scope: 'china',
     visitedRoads: [], onLog() {}, onUpdate() {}, onRoll() {},
   });
   let cnTotal = 0;
-  for (let i = 0; i < 12; i++) {
+  for (let i = 0; i < 30; i++) {
     eCn.bearing = 0;   // 锁定大致向北，避免随机游走让净位移断言 flaky
     await eCn._planNext(true);
     if (!eCn.route) { console.log(`  [diag] 段${i + 1} 无路线，提前结束`); break; }
@@ -639,7 +639,7 @@ const shown = (id) => $(id).classList.contains('show');
     eCn.traveled = eCn.route.distance;
     eCn._applyPosition();
   }
-  ok('全国尺度 12 段累计位移 > 200km（直线兜底生效）', cnTotal > 200000, (cnTotal / 1000).toFixed(0) + ' km');
+  ok('全国尺度 30 段累计位移 > 200km（直线兜底生效）', cnTotal > 200000, (cnTotal / 1000).toFixed(0) + ' km');
   const cnMoved = win.NetWalkGeo.haversine(GZ, eCn.pos);
   // ROLL100 方向随机，12 段的净位移有波动（累计路线 >200km 已在上一条验证"能走远"）
   ok('分身已离开广州市区（>15km）', cnMoved > 15000, (cnMoved / 1000).toFixed(0) + ' km');
@@ -652,7 +652,7 @@ const shown = (id) => $(id).classList.contains('show');
     visitedRoads: [], onLog() {}, onUpdate() {}, onRoll() {},
   });
   let wTotal = 0;
-  for (let i = 0; i < 10; i++) {
+  for (let i = 0; i < 20; i++) {
     eW.bearing = 0;   // 锁定大致向北：ROLL 仍会 ±90° 转向，这里验证"累计位移"而非方向
     await eW._planNext(true);
     if (!eW.route) { console.log(`  [diag] W 段${i + 1} 无路线`); break; }
@@ -660,10 +660,11 @@ const shown = (id) => $(id).classList.contains('show');
     eW.traveled = eW.route.distance;
     eW._applyPosition();
   }
-  ok('全球尺度 10 段累计位移 > 1500km（可跨出国境）', wTotal > 1500000, (wTotal / 1000).toFixed(0) + ' km');
+  // 0.9.8 起每段约 240-300m：20 段 × 270m × 500 ≈ 2700km（旧规则单段更长、段数更少）
+  ok('全球尺度 20 段累计位移 > 1500km（可跨出国境）', wTotal > 1500000, (wTotal / 1000).toFixed(0) + ' km');
   const wMoved = win.NetWalkGeo.haversine(GZ, eW.pos);
-  // ROLL100 会随机转向，净位移是随机游走合成（10 段 × 200km，期望净位移 ≈ √10×200 ≈ 630km），
-  // 断言取保守下限：只要明显离开广东（>100km）即视为"可走出中国"
+  // ROLL100 会随机转向，净位移是随机游走合成（20 段 × 130km，期望净位移 ≈ √20×130 ≈ 580km），
+  // 断言取保守下限：只要明显离开广东（>80km）即视为"可走出中国"
   ok('净位移已离开广州都市圈（>80km）', wMoved > 80000, (wMoved / 1000).toFixed(0) + ' km');
   const cityDayKm = (5 / 3.6) * 3600 * 8 / 1000;
   // 一天(8h·5km/h)在 500× 下的地图距离 ≈ 2 万 km —— 环游世界一圈(4 万 km)约两天

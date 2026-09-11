@@ -110,12 +110,14 @@
     else if (r <= 68) { choice = '左转'; delta = -90; }
     else if (r <= 89) { choice = '右转'; delta = 90; }
     else if (r <= 96) { choice = '掉头'; delta = 180; }
-    else { choice = '灵感爆发·远行'; delta = 0; }
+    else { choice = '灵感爆发·远行'; delta = (Math.random() < 0.5 ? -1 : 1) * (60 + Math.random() * 120); }
 
     const jitter = (Math.random() - 0.5) * 24;
     let bearing = (currentBearing + delta + jitter) % 360;
     if (bearing < 0) bearing += 360;
-    const distance = r >= 97 ? 900 + Math.random() * 600 : 180 + r * 5.5 + Math.random() * 120;
+    // 玩法（0.9.8 起）：每段固定 240–300 米，走完就掷下一次 ——
+    // 由 ROLL 规则决定下一段的方向（下一个导航点），节奏更密、更像真的在路口做选择
+    const distance = 240 + Math.random() * 60;
     return { roll: r, choice, bearing, distance };
   }
 

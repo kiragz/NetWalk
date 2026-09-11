@@ -638,6 +638,20 @@ app.post('/api/track/roll', (req, res) => {
   res.json({ ok: true });
 });
 
+/** 轨迹整备：整体替换某天的轨迹点（吸附到道路后的版本）；rolls/samples/sessions/stats 保留 */
+app.post('/api/track/rewrite', (req, res) => {
+  const body = req.body || {};
+  const date = String(body.date || todayStr()).slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ ok: false, error: '日期格式应为 YYYY-MM-DD' });
+  try {
+    const n = store.rewritePath(date, body.points || []);
+    logLine(`track rewrite: ${date} -> ${n} points`);
+    res.json({ ok: true, date, points: n });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e && e.message ? e.message : String(e) });
+  }
+});
+
 app.post('/api/session/start', (req, res) => {
   const body = req.body || {};
   const date = body.date || todayStr();

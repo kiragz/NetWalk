@@ -383,6 +383,35 @@ class TrackStore {
     return cur;
   }
 
+  /**
+   * 轨迹整备：用吸附到道路后的点集整体替换某天的轨迹。
+   * 只替换 path（形状 + 路名），rolls/samples/sessions/stats 全部保留 —— 统计口径不变。
+   */
+  rewritePath(date, points) {
+    if (!Array.isArray(points)) throw new Error('points 必须是数组');
+    const clean = [];
+    const now = Date.now();
+    for (const p of points) {
+      const lat = Number(p && p.lat), lng = Number(p && p.lng), t = Number(p && p.t);
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+      if (lat < -85 || lat > 85 || lng < -180 || lng > 180) continue;
+      clean.push({
+        t: (Number.isFinite(t) && t > 0 && t <= now + 60000) ? Math.round(t) : now,
+        lat: Number(lat.toFixed(6)),
+        lng: Number(lng.toFixed(6)),
+        road: String((p && p.road) || ''),
+        spd: Number(p && p.spd) || 0,
+        mode: (p && p.mode) || 'walk',
+      });
+    }
+    if (clean.length < 2) throw new Error('有效轨迹点不足 2 个，已放弃替换');
+    const data = this.load(date);
+    data.path = clean;
+    this.markDirty(date);
+    this.flush();
+    return clean.length;
+  }
+
   /** 结束当天漫游，写入汇总统计 */
   finish(date, stats) {
     const data = this.load(date);

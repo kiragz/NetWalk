@@ -86,6 +86,7 @@
       this.backtracks = 0;      // 原路返回次数（ROLL100 重来）
       this.roadPct = 0;
       this.roadRemain = 0;
+      this.roadDone = 0;        // 已在当前这条路走了多少米（0.9.8 起 HUD 显示米数而不是百分比）
       this.roadLen = 0;
       this.totals = { rx: 0, tx: 0, keys: 0 };
 
@@ -269,8 +270,9 @@
             }
             this.onLog(`走上 ${st.road}`);
           }
-            // 当前这条路的推进百分比
+            // 当前这条路的推进：0.9.8 起以「已走多少米」呈现（而不是百分比）
             const done = traveled - start;
+            this.roadDone = Math.max(0, done);
             this.roadPct = st.distance > 0
               ? Math.max(0, Math.min(100, (done / st.distance) * 100))
               : 0;
@@ -485,6 +487,7 @@
         roadPct: this.roadPct || 0,
         roadRemain: this.roadRemain || 0,
         roadLen: this.roadLen || 0,
+        roadDone: this.roadDone || 0,
         distance: s.distance,
         durationMs: s.durationMs,
         rolls: s.rolls,

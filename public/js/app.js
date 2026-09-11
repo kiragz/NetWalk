@@ -98,6 +98,7 @@
     mailImapHost: $('mailImapHost'), mailImapPort: $('mailImapPort'),
     mailBoxStatus: $('mailBoxStatus'), btnMailStatus: $('btnMailStatus'), btnMailPush: $('btnMailPush'),
     autoMailArchive: $('autoMailArchive'), btnMailClean: $('btnMailClean'),
+    btnSnapTrack: $('btnSnapTrack'),
     btnRgLogin: $('btnRgLogin'),
     btnSecClear: $('btnSecClear'), secHint: $('secHint'),
     mVisited: $('mVisited'), mLit: $('mLit'),
@@ -867,8 +868,22 @@
       const flat = days.flatMap((d) => d.path || []);
       if (flat.length < 2) { log('地图上还没有历史轨迹，本次行走将开始画线'); }
       else {
-        state.provider.setTrack(flat);
-        log(`已把历史轨迹画上地图：${days.length} 天、${flat.length} 个轨迹点`);
+        // 按间断切开再画：跨会话/跨天的"瞬移"（空间跳变 >250m 或时间断档 >15 分钟）
+        // 不该被连成一条横穿城市的直线 —— 那是"路径画乱"的主要来源之一
+        const segs = [];
+        let cur = [flat[0]];
+        for (let i = 1; i < flat.length; i++) {
+          const m = haversineKm(flat[i - 1], flat[i]);
+          const dt = (flat[i].t || 0) - (flat[i - 1].t || 0);
+          if (m > 250 || dt > 15 * 60000) { segs.push(cur); cur = [flat[i]]; }
+          else cur.push(flat[i]);
+        }
+        if (cur.length) segs.push(cur);
+        segs.forEach((seg, idx) => {
+          if (seg.length < 2) return;
+          state.provider.setTrack(seg, { append: idx > 0 });
+        });
+        log(`已把历史轨迹画上地图：${days.length} 天、${flat.length} 个点、${segs.length} 段连续轨迹`);
       }
       for (const st of (r && r.starts) || []) {
         if (state.provider.addStartMarker) state.provider.addStartMarker(st.lat, st.lng, st.n);
@@ -876,18 +891,113 @@
     } catch (_) { /* 离线时忽略，不影响行走 */ }
   }
 
+  // ---------- 轨迹整备：把历史轨迹吸附到真实道路上 ----------
+  /** 按空间/时间间断与累计长度把一天的路迹切成若干段（每段 ≤ ~400m，用于逐段重新规划） */
+  function splitTrackChunks(path) {
+    const chunks = [];
+    let cur = [path[0]];
+    let acc = 0;
+    for (let i = 1; i < path.length; i++) {
+      const a = path[i - 1], b = path[i];
+      const m = haversineKm(a, b);
+      acc += m;
+      // 时间断档 > 15 分钟或空间跳变 > 250m 视为两段；累计超过 400m 也切开（保证每段规划便宜且贴路）
+      if (m > 250 || (b.t - a.t) > 15 * 60000 || acc > 400) {
+        chunks.push(cur); cur = [b]; acc = 0;
+      } else cur.push(b);
+    }
+    if (cur.length) chunks.push(cur);
+    return chunks;
+  }
+
+  /** 用重新规划出的路线替换一段轨迹：时间按距离比例重排，路名按步骤里程映射重算 */
+  function retimeChunk(route, ch) {
+    const pts = route.points;
+    const t0 = ch[0].t, t1 = ch[ch.length - 1].t || t0 + 60000;
+    const cum = [0];
+    for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + haversineKm(pts[i - 1], pts[i]));
+    const total = cum[cum.length - 1] || 1;
+    const steps = route.steps || [];
+    const stepSum = steps.reduce((s, x) => s + (x.distance || 0), 0);
+    const k = stepSum > 0 ? total / stepSum : 1;
+    const roadAt = (d) => {
+      let acc = 0;
+      for (const st of steps) {
+        acc += (st.distance || 0) * k;
+        if (d <= acc) return st.road || '';
+      }
+      return steps.length ? (steps[steps.length - 1].road || '') : '';
+    };
+    const durSec = Math.max(1, (t1 - t0) / 1000);
+    const spd = Math.round(((total / durSec) * 3.6) * 10) / 10;
+    const mode = ch[0].mode || 'walk';
+    return pts.map((p, i) => ({
+      t: Math.round(t0 + (cum[i] / total) * (t1 - t0)),
+      lat: p.lat, lng: p.lng,
+      road: roadAt(cum[i]) || (ch[0].road || ''),
+      spd, mode,
+    }));
+  }
+
+  /** 轨迹整备主流程：逐天逐段重新沿真实道路规划，替换后形状全部贴路、路名重算 */
+  async function snapTrackToRoads(btn) {
+    if (!state.provider || state.provider.name !== 'amap') {
+      log('⚠ 轨迹整备需要高德模式（在线）；演练模式没有真实路网可吸附。');
+      return;
+    }
+    const old = btn.textContent;
+    btn.disabled = true;
+    let daysDone = 0, segSnap = 0, segKeep = 0, calls = 0;
+    try {
+      const r = await fetch('/api/track/range?from=0000-01-01&to=' + today()).then((x) => x.json());
+      const days = (r && r.days) || [];
+      for (const day of days) {
+        const path = day.path || [];
+        if (path.length < 2) continue;
+        const chunks = splitTrackChunks(path);
+        const newPts = [];
+        let changed = false;
+        for (const ch of chunks) {
+          if (ch.length < 2) { newPts.push(...ch); continue; }
+          const a = ch[0], b = ch[ch.length - 1];
+          const route = await state.provider.planRoute({ lat: a.lat, lng: a.lng }, { lat: b.lat, lng: b.lng });
+          if (!route || !route.points || route.points.length < 2) {
+            newPts.push(...ch); segKeep++;
+            continue;
+          }
+          newPts.push(...retimeChunk(route, ch));
+          segSnap++; changed = true;
+        }
+        calls += chunks.length;
+        btn.textContent = `整备中 ${daysDone + 1}/${days.length} 天`;
+        if (!changed) continue;
+        const w = await fetch('/api/track/rewrite', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ date: day.date, points: newPts }),
+        }).then((x) => x.json());
+        if (w.ok) daysDone++;
+      }
+      log(`🧭 轨迹整备完成：${daysDone} 天已更新，${segSnap} 段吸附到道路（${segKeep} 段规划失败保留原样，共 ${calls} 次规划）`);
+      log('地图上的历史轨迹已全部落在真实道路上；里程/时长/成就等统计不受影响。');
+      drawHistoryOnMap(state.origin);
+    } catch (e) {
+      log('轨迹整备失败：' + (e && e.message ? e.message : e));
+    } finally {
+      btn.disabled = false; btn.textContent = old;
+    }
+  }
+
   function onEngineUpdate(s) {
     const modes = window.NetWalkSpeed.MODES;
     const m = modes[s.mode] || modes.walk;
-    el.speed.innerHTML = `${s.speedKmh.toFixed(1)}<small>km/h</small>`;
-    el.mode.textContent = `${m.icon} ${m.label}`;
+    el.speed.innerHTML = `${s.speedKmh.toFixed(1)}<small>km/h</small>`;    el.mode.textContent = `${m.icon} ${m.label}`;
     el.mode.style.color = m.color;
     const pct = Math.round(Math.min(100, (s.speedKmh / (state.cfg.speed.runMax * 1.35)) * 100));
     el.bar.style.width = `${pct}%`;
     el.intensity.textContent = `${pct}%`;
     el.road.textContent = s.road || '—';
     el.seg.textContent = s.road
-      ? `在 ${s.road} 走 ${(s.roadPct || 0).toFixed(0)}%（剩 ${(s.roadRemain || 0).toFixed(0)} m）`
+      ? `在 ${s.road} 已走 ${Math.round(s.roadDone || 0)} m（剩 ${Math.round(s.roadRemain || 0)} m，全程 ${Math.round(s.roadLen || 0)} m）`
       : '—';
     el.dist.textContent = `${(s.distance / 1000).toFixed(2)} km`;
     el.dur.textContent = fmtDur(s.durationMs);
@@ -1611,6 +1721,24 @@
     el.btnStats.addEventListener('click', openStats);
     el.btnStatsClose.addEventListener('click', () => el.maskStats.classList.remove('show'));
     el.maskStats.addEventListener('click', (e) => { if (e.target === el.maskStats) el.maskStats.classList.remove('show'); });
+    // 轨迹整备：两步确认（会改写历史轨迹的形状与路名，统计不变）
+    if (el.btnSnapTrack) {
+      let snapArmed = false, snapTimer = null;
+      el.btnSnapTrack.addEventListener('click', async () => {
+        const btn = el.btnSnapTrack;
+        if (!snapArmed) {
+          snapArmed = true;
+          btn.textContent = '再点一次确认整备';
+          log('🧭 轨迹整备将按约 400 米分段重新沿真实道路规划历史轨迹（统计不变）。建议先「💾 存档」留一份备份。再点一次执行。');
+          clearTimeout(snapTimer);
+          snapTimer = setTimeout(() => { snapArmed = false; btn.textContent = '🧭 轨迹整备'; }, 8000);
+          return;
+        }
+        snapArmed = false;
+        clearTimeout(snapTimer);
+        await snapTrackToRoads(btn);
+      });
+    }
     el.statsTabs.addEventListener('click', (e) => {
       const btn = e.target.closest && e.target.closest('.ach-tab');
       if (!btn) return;

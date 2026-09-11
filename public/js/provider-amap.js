@@ -210,13 +210,15 @@
       if (this._trackPts.length > 5000) this._trackPts = this._trackPts.slice(-4000);
     }
 
-    setTrack(points) {
+    setTrack(points, { append = false } = {}) {
       if (!this._ready) return;
-      this.clearStartMarkers();
-      // 历史轨迹恢复：逐段按各自的速度上色
-      this._speedLines.forEach((l) => l.setPath([]));
-      this._trackPts = [];
-      this._lastSpd = null;
+      if (!append) {
+        this.clearStartMarkers();
+        // 历史轨迹恢复：逐段按各自的速度上色
+        this._speedLines.forEach((l) => l.setPath([]));
+        this._trackPts = [];
+        this._lastSpd = null;
+      }
       for (let i = 1; i < points.length; i++) {
         this.addTrackPoint(points[i].lat, points[i].lng, points[i - 1], points[i].spd);
       }
