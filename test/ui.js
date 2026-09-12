@@ -285,17 +285,16 @@ const shown = (id) => $(id).classList.contains('show');
       },
     };
   };
-  // I-1：唯一路线全是走过的路 → 引擎应重掷并最终兜底不卡死
+  // I-1：唯一路线全是走过的路 → 0.9.16 起方向由 ROLL 决定（不按新路占比重掷），
+  // 掷到重复路也照走（减少重复靠 100 个方位的探索半径，而不是重掷）
   const p1 = mkProvider('REPEAT_ROAD');
   const e1 = new win.RoamEngine({
     provider: p1, cfg: {}, origin: { lat: 22.54, lng: 114.05 }, scope: 'city',
     visitedRoads: ['REPEAT_ROAD'], onLog() {}, onUpdate() {}, onRoll() {},
   });
   await e1._planNext(true);
-  // 「不走重复路」的判定已放宽（新路占比 0.5 → 0.2），重掷次数相应减少：
-  // 宁可走一小段旧路，也不让分身在路口干等多次网络请求
-  ok('重复路触发重掷', e1.repeatSkips >= 1, 'skips=' + e1.repeatSkips);
-  ok('重掷后仍有路线（不卡死）', !!e1.route);
+  ok('重复路也照常规划（方向由 ROLL 决定，不卡死）', !!e1.route);
+  ok('ROLL 记录保存新路占比（诊断用）', e1.stats.rolls === 1, 'rolls=' + e1.stats.rolls);
   e1.stop();
 
   // I-1b：路网始终规划不出结果（前方不通）→ 原路返回上一个路口重掷，且绝不停住

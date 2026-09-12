@@ -341,8 +341,9 @@
       try {
         const scale = this._scale();
         const isDrill = this.provider.name === 'drill';
-        // 演练模式路网在本地计算，可以多试一次；高德模式要走网络，保守一些
-        const maxTry = isDrill ? 3 : 2;
+        // 演练模式路网在本地计算，可以多试几次；高德模式要走网络，受 PLAN_BUDGET 约束
+        // （扫描是顺时针 30° 一步，4~6 次尝试覆盖 90°~150°，足够找到可达的路）
+        const maxTry = isDrill ? 6 : 4;
         // 一次抉择的时间预算，到了点就用已拿到的最好结果，避免分身长时间静止
         const deadline = Date.now() + PLAN_BUDGET;
 
@@ -373,20 +374,25 @@
           d = { roll: 100, choice: '远方引力·出城', bearing: away, distance: 1200 };
           this._rollsSinceHome = 0;   // 这次强制出城后重新计数（12 段 ≈ 3.6km 足以出圈）
         } else {
+          // 玩法（0.9.16，采纳玩家提案）：ROLL 点数 = 百分比 → 顺时针 0-360° 的绝对方位
+          // （正北 0%，正东 25%，正南 50%，正西 75%）。100 个方向替代旧的 4 选 1，
+          // 探索半径大增，重复路自然减少。下一段目的地 = 沿该方向第一段可到达的道路；
+          // 该方向不可达就顺时针扫过去，直到找到第一条可达的路（见 attempt 循环的 +30° 扫描）。
           roll = 1 + Math.floor(Math.random() * 100);
-          d = rollJunction(roll, this.bearing);
+          d = { roll, choice: `${roll}% 方向`, bearing: (roll * 3.6) % 360, distance: 300 };
         }
         let route = null;
         let freshRatio = 1;
         let backtracked = false;
+        let swept = 0;   // 顺时针扫描过的角度（诊断/日志用）
 
         for (let attempt = 1; attempt <= maxTry; attempt++) {
           if (Date.now() > deadline) break;
           if (attempt > 1) {
-            // 上一条路线大多是走过的路，重新掷点换个方向（顺路直走/引力段不重掷，方向是既定的）
+            // 该方向不可达 → 顺时针扫 30° 找第一条可达的路（ROLL 的语义保持：从掷出的百分比方向顺时针找）
             if (!cruise && !gravity) {
-              roll = 1 + Math.floor(Math.random() * 100);
-              d = rollJunction(roll, this.bearing);
+              d = { ...d, bearing: (d.bearing + 30) % 360 };
+              swept += 30;
               this.repeatSkips++;
             }
           }
@@ -406,8 +412,8 @@
             ? roads.filter((x) => !this.visitedRoads.has(x)).length / roads.length
             : 1;
           route = r;
-          if (freshRatio >= FRESH_MIN || cruise || gravity) break;
-          // 新路够多就接受（阈值已放宽，宁可走点旧路也不卡住）；顺路直走/引力段方向既定，不因走旧路重掷
+          // 方向由 ROLL 决定（顺时针扫描兜底），不再按"新路占比"重掷 —— 掷到哪走到哪
+          break;
         }
 
         if (!route) {
@@ -418,12 +424,12 @@
             this.pos = Object.assign({}, back.pos);
             this.backtracks++;
             backtracked = true;
-            // 退回来后换个明显不同的朝向再掷，避免又撞同一堵墙
+            // 退回来后换个明显不同的朝向再掷（0.9.16 百分比方位模型），避免又撞同一堵墙
             const base = (back.bearing + 90 + Math.random() * 180) % 360;
             roll = 1 + Math.floor(Math.random() * 100);
-            d = rollJunction(roll, base);
+            d = { roll, choice: `${roll}% 方向`, bearing: (base + roll * 3.6) % 360, distance: 300 };
             this.bearing = d.bearing;
-            this.onLog(`前方不通，原路返回路口 ROLL ${roll} → ${d.choice}`);
+            this.onLog(`前方不通，原路返回路口 ROLL ${roll}% → 方位 ${Math.round(d.bearing)}°`);
             const target = destPoint(this.pos, d.bearing, d.distance * scale);
             const r2 = await this._planRouteSafe(this.pos, target, 4000);
             if (r2) {
@@ -434,13 +440,13 @@
               route = this._straightRoute(d.bearing, Math.max(120, d.distance * scale));
             }
           } else {
-            // 退无可退（栈空或连续受阻）：随机大转向强行推进
+            // 退无可退（栈空或连续受阻）：随机方向强行推进
             this.blockedStreak = 0;
             this.junctionStack.length = 0;
             roll = 1 + Math.floor(Math.random() * 100);
-            d = rollJunction(roll, this.bearing + 120 + Math.random() * 120);
+            d = { roll, choice: `${roll}% 方向`, bearing: (roll * 3.6) % 360, distance: 300 };
             this.bearing = d.bearing;
-            this.onLog(`附近无路可走，本段直线推进（转向 ${d.choice}）`);
+            this.onLog(`附近无路可走，本段直线推进（ROLL ${roll}%）`);
             route = this._straightRoute(d.bearing, Math.max(150, d.distance * scale));
           }
           freshRatio = 0;
@@ -502,7 +508,7 @@
         if (!first && !backtracked) {
           if (cruise) this.onLog(`顺路直走：继续沿 ${this.road || '当前道路'}（连击 ${streak + 1}，本段 ${Math.round(d.distance)} m）`);
           else if (gravity) this.onLog(`远方引力：已 ${stuck} 段未离开出发点 3km，向城外远行 ${Math.round(d.distance)} m`);
-          else this.onLog(`路口 ROLL ${d.roll} → ${d.choice}`);
+          else this.onLog(`ROLL ${d.roll}% → 方位 ${Math.round(d.bearing)}°${swept ? `（顺时针扫描 ${swept}° 后可达）` : ''}`);
         }
       } finally {
         this.planning = false;
