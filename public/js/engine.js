@@ -386,10 +386,13 @@
         let backtracked = false;
         let swept = 0;   // 顺时针扫描过的角度（诊断/日志用）
 
-        for (let attempt = 1; attempt <= maxTry; attempt++) {
+        // 扫描上限：百分比方位模型下多扫几步，找「该方向上第一条可达且没走过的道路」
+        // （受 PLAN_BUDGET=7s 约束；顺路直走/引力段方向既定，不扫描）
+        const maxAttempts = cruise || gravity ? 1 : (isDrill ? 12 : 8);
+        for (let attempt = 1; attempt <= maxAttempts; attempt++) {
           if (Date.now() > deadline) break;
           if (attempt > 1) {
-            // 该方向不可达 → 顺时针扫 30° 找第一条可达的路（ROLL 的语义保持：从掷出的百分比方向顺时针找）
+            // 该方向不可达 / 全是走过的路 → 顺时针扫 30° 继续找
             if (!cruise && !gravity) {
               d = { ...d, bearing: (d.bearing + 30) % 360 };
               swept += 30;
@@ -412,8 +415,10 @@
             ? roads.filter((x) => !this.visitedRoads.has(x)).length / roads.length
             : 1;
           route = r;
-          // 方向由 ROLL 决定（顺时针扫描兜底），不再按"新路占比"重掷 —— 掷到哪走到哪
-          break;
+          // 玩家提案的语义：目的地 = 该方向上第一条「可达且没走过」的道路。
+          // 这条方向扫到的路全是走过的 → 继续顺时针扫；角度用完就走最后这条（宁走旧路不卡住）
+          const allRepeat = roads.length > 0 && roads.every((x) => this.visitedRoads.has(x) || x === this.road);
+          if (!allRepeat) break;
         }
 
         if (!route) {
@@ -492,12 +497,13 @@
         // 顺路直走不是掷点：不计入 ROLL 统计、不写 ROLL 记录
         if (!cruise) {
           this.stats.rolls++;
-          const rec = {
-            t: Date.now(), lat: this.pos.lat, lng: this.pos.lng,
-            road: this.road, roll: d.roll, choice: d.choice, bearing: d.bearing,
-            fresh: Number(freshRatio.toFixed(2)),
-            backtrack: backtracked,
-          };
+        const rec = {
+          t: Date.now(), lat: this.pos.lat, lng: this.pos.lng,
+          road: this.road, roll: d.roll, choice: d.choice, bearing: d.bearing,
+          fresh: Number(freshRatio.toFixed(2)),
+          backtrack: backtracked,
+          swept,   // 顺时针扫描角度：找到"没走过的路"花了多少度（诊断重复路用）
+        };
           this.onRoll(rec);
           fetch('/api/track/roll', {
             method: 'POST', headers: { 'Content-Type': 'application/json' },
