@@ -26,6 +26,11 @@
 
 ## 快速开始
 
+**📦 免安装版（推荐）**：直接下载单文件 exe（86MB，双击即用）：
+https://github.com/kiragz/NetWalk/releases/download/v0.9.17/NetWalk.exe
+
+源码方式运行：
+
 ```bash
 cd netwalk
 npm install          # 首次运行
