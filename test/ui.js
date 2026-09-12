@@ -700,6 +700,49 @@ const shown = (id) => $(id).classList.contains('show');
   ok('城市尺度一天约 40km（在市内深耕）', cityDayKm > 35 && cityDayKm < 45, cityDayKm.toFixed(0) + ' km');
   eW.stop();
 
+  console.log('\n== O. 顺路直走 + 远方引力 ==');
+  const roadRoute = { points: [{ lat: 22.54, lng: 114.05 }, { lat: 22.545, lng: 114.06 }], steps: [{ road: '华景路', distance: 600 }], distance: 600 };
+  const logsO = [];
+  const mkRoad = () => {
+    const p = mkProvider('ROADP');
+    p.planRoute = () => Promise.resolve(JSON.parse(JSON.stringify(roadRoute)));
+    return p;
+  };
+  const eR = new win.RoamEngine({
+    provider: mkRoad('ROADP'), cfg: {}, origin: { lat: 22.54, lng: 114.05 }, scope: 'city',
+    visitedRoads: [], onLog: (m) => logsO.push(m), onUpdate() {}, onRoll() {},
+  });
+  eR.road = '华景路';
+  eR.route = { steps: [{ road: '华景路', distance: 600 }] };   // 上一段也在同一条路上
+  eR._lastChoice = '直行'; eR._straightStreak = 2;             // 已连续两次直行
+  const rollsO = eR.stats.rolls;
+  await eR._planNext(false);
+  ok('顺路直走：长路连击时不再掷点（不计 ROLL 统计）', eR.stats.rolls === rollsO,
+    `${eR.stats.rolls}/${rollsO}`);
+  ok('顺路直走：连击 +1（下一段更远）', eR._straightStreak === 3, 'streak=' + eR._straightStreak);
+  ok('顺路直走：日志说明延伸', logsO.some((m) => m.indexOf('顺路直走') >= 0), logsO.join(' | ').slice(0, 100));
+
+  // 路线里出现新路名 = 这条路到头了 → 恢复 ROLL100（当前段仍是直走段，下一段才重新掷点）
+  eR.provider.planRoute = () => Promise.resolve({ points: roadRoute.points, steps: [{ road: '中山大道', distance: 600 }], distance: 600 });
+  await eR._planNext(false);
+  ok('走到路尽头（路线出现新路名）→ 连击清零', eR._straightStreak === 0, 'streak=' + eR._straightStreak);
+  await eR._planNext(false);
+  ok('下一段恢复掷点（计入 ROLL 统计）', eR.stats.rolls === rollsO + 1, `${eR.stats.rolls}/${rollsO + 1}`);
+  eR.stop();
+
+  // 远方引力：长期没出出发点 3km 圈 → 强制向城外远行
+  let gravityRec = null;
+  const eG = new win.RoamEngine({
+    provider: mkRoad('GRAVP'), cfg: {}, origin: { lat: 22.54, lng: 114.05 }, scope: 'city',
+    visitedRoads: [], onLog() {}, onUpdate() {}, onRoll: (r) => { gravityRec = r; },
+  });
+  eG._rollsSinceHome = 20;   // 模拟长期未出圈
+  await eG._planNext(true);
+  ok('远方引力：长期未出圈触发强制出城段', !!gravityRec && gravityRec.choice === '远方引力·出城',
+    gravityRec && gravityRec.choice);
+  ok('远方引力：按远行 1200m 规划', !!gravityRec && gravityRec.roll === 100, gravityRec && gravityRec.roll);
+  eG.stop();
+
   console.log('\n===== UI 测试结果：' + pass + ' 通过 / ' + fail + ' 失败 =====');
   if (errors.length) { console.log('\n捕获到的错误：'); errors.slice(0, 10).forEach((e) => console.log('  - ' + e)); }
   process.exit(fail ? 1 : 0);

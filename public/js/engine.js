@@ -346,8 +346,36 @@
         // 一次抉择的时间预算，到了点就用已拿到的最好结果，避免分身长时间静止
         const deadline = Date.now() + PLAN_BUDGET;
 
-        let roll = 1 + Math.floor(Math.random() * 100);
-        let d = rollJunction(roll, this.bearing);
+        // —— 顺路直走（0.9.15，采纳玩家提案）：连续两次直行且还在同一条路上 → 停止 ROLL，
+        // 沿当前方向继续延伸，距离随连击放大（300→600→900→1200 封顶），
+        // 直到规划出的路线里出现新的路名（这条路到头了）才恢复路口 ROLL ——
+        const streak = this._straightStreak || 0;
+        const onSameRoad = Boolean(this.road) && Boolean((this.route || {}).steps)
+          && this.route.steps.some((s) => s.road === this.road);
+        const cruise = !first && this._lastChoice === '直行' && streak >= 2 && onSameRoad;
+
+        // —— 出城保障（0.9.15）：随机游走的净位移是 √N×段长，纯靠概率永远走不出城 ——
+        // 出发后走了很多段仍未离开出发点 3km → 强制"背离出发点"的远行（1200m），直到出圈
+        this._rollsSinceHome = (this._rollsSinceHome || 0) + 1;
+        const homeDist = this.origin ? haversine(this.origin, this.pos) : Infinity;
+        if (homeDist > 3000) this._rollsSinceHome = 0;
+        const gravity = !cruise && this._rollsSinceHome > 12 && homeDist < 3000;
+        const stuck = this._rollsSinceHome;
+
+        let roll = 0;
+        let d;
+        if (cruise) {
+          d = { roll: 0, choice: '顺路直走', bearing: this.bearing, distance: Math.min(300 + streak * 300, 1200) };
+        } else if (gravity) {
+          let away = 0;
+          try { away = global.NetWalkGeo.bearingOf(this.origin, this.pos); } catch (_) { away = this.bearing; }
+          away = (away + (Math.random() - 0.5) * 60 + 360) % 360;
+          d = { roll: 100, choice: '远方引力·出城', bearing: away, distance: 1200 };
+          this._rollsSinceHome = 0;   // 这次强制出城后重新计数（12 段 ≈ 3.6km 足以出圈）
+        } else {
+          roll = 1 + Math.floor(Math.random() * 100);
+          d = rollJunction(roll, this.bearing);
+        }
         let route = null;
         let freshRatio = 1;
         let backtracked = false;
@@ -355,10 +383,12 @@
         for (let attempt = 1; attempt <= maxTry; attempt++) {
           if (Date.now() > deadline) break;
           if (attempt > 1) {
-            // 上一条路线大多是走过的路，重新掷点换个方向
-            roll = 1 + Math.floor(Math.random() * 100);
-            d = rollJunction(roll, this.bearing);
-            this.repeatSkips++;
+            // 上一条路线大多是走过的路，重新掷点换个方向（顺路直走/引力段不重掷，方向是既定的）
+            if (!cruise && !gravity) {
+              roll = 1 + Math.floor(Math.random() * 100);
+              d = rollJunction(roll, this.bearing);
+              this.repeatSkips++;
+            }
           }
           let target = destPoint(this.pos, d.bearing, d.distance * scale);
           let r = null;
@@ -376,7 +406,8 @@
             ? roads.filter((x) => !this.visitedRoads.has(x)).length / roads.length
             : 1;
           route = r;
-          if (freshRatio >= FRESH_MIN) break;   // 新路够多就接受（阈值已放宽，宁可走点旧路也不卡住）
+          if (freshRatio >= FRESH_MIN || cruise || gravity) break;
+          // 新路够多就接受（阈值已放宽，宁可走点旧路也不卡住）；顺路直走/引力段方向既定，不因走旧路重掷
         }
 
         if (!route) {
@@ -436,21 +467,43 @@
         route.points[0] = Object.assign({}, this.pos);
         this.route = route;
         this.traveled = 0;
-        this.stats.rolls++;
 
-        const rec = {
-          t: Date.now(), lat: this.pos.lat, lng: this.pos.lng,
-          road: this.road, roll: d.roll, choice: d.choice, bearing: d.bearing,
-          fresh: Number(freshRatio.toFixed(2)),
-          backtrack: backtracked,
-        };
-        this.onRoll(rec);
-        fetch('/api/track/roll', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(rec),
-        }).catch(() => { /* 离线时忽略 */ });
+        // 顺路直走的连击记账：路线里出现别的路名 → 这条路到头了，恢复 ROLL；
+        // 还在同一条路上 → 连击 +1（下一段更远）。普通直行也累计连击。
+        if (cruise) {
+          const names = (route.steps || []).map((s) => s.road).filter(Boolean);
+          if (this.road && names.some((x) => x !== this.road)) {
+            this._straightStreak = 0;
+            this.onLog(`走到 ${this.road} 尽头，恢复路口 ROLL100`);
+          } else {
+            this._straightStreak = streak + 1;
+          }
+        } else {
+          this._straightStreak = d.choice === '直行' ? (this._straightStreak || 0) + 1 : 0;
+          this._lastChoice = d.choice;
+        }
+
+        // 顺路直走不是掷点：不计入 ROLL 统计、不写 ROLL 记录
+        if (!cruise) {
+          this.stats.rolls++;
+          const rec = {
+            t: Date.now(), lat: this.pos.lat, lng: this.pos.lng,
+            road: this.road, roll: d.roll, choice: d.choice, bearing: d.bearing,
+            fresh: Number(freshRatio.toFixed(2)),
+            backtrack: backtracked,
+          };
+          this.onRoll(rec);
+          fetch('/api/track/roll', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(rec),
+          }).catch(() => { /* 离线时忽略 */ });
+        }
         // 原路返回时上面已经打过一条更具体的日志，这里不重复
-        if (!first && !backtracked) this.onLog(`路口 ROLL ${d.roll} → ${d.choice}`);
+        if (!first && !backtracked) {
+          if (cruise) this.onLog(`顺路直走：继续沿 ${this.road || '当前道路'}（连击 ${streak + 1}，本段 ${Math.round(d.distance)} m）`);
+          else if (gravity) this.onLog(`远方引力：已 ${stuck} 段未离开出发点 3km，向城外远行 ${Math.round(d.distance)} m`);
+          else this.onLog(`路口 ROLL ${d.roll} → ${d.choice}`);
+        }
       } finally {
         this.planning = false;
       }
