@@ -29,6 +29,8 @@
 **📦 免安装版（推荐）**：直接下载单文件 exe（86MB，双击即用）：
 https://github.com/kiragz/NetWalk/releases/download/v0.9.17/NetWalk.exe
 
+**📱 百度网盘**（国内直连）：链接 https://pan.baidu.com/s/1ib4l4Fb01FLuoOthzFtgPQ?pwd=tfe2 提取码: tfe2
+
 源码方式运行：
 
 ```bash
