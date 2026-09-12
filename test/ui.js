@@ -486,6 +486,19 @@ const shown = (id) => $(id).classList.contains('show');
     newRuns.length === 1 && newRuns[0].path.length === 2 && newRuns[0].path[0].lng === 2,
     JSON.stringify(newRuns.map((l) => l.path.length)));
 
+  // 飞线回归 2：速度跨档来回变化时，回到旧档绝不能追加进旧笔迹
+  // （否则速度波动就会把相距很远的两部分连进同一条线 —— v0.9.13 仍存在的飞线来源）
+  const before2 = amapSt.speedLines.length;
+  ap.setTrack([{ lat: 1, lng: 1, spd: 5 }, { lat: 1.001, lng: 1.001, spd: 8 }]);            // 5→8 跨档
+  ap.setTrack([{ lat: 2, lng: 2, spd: 8 }, { lat: 2.001, lng: 2.001, spd: 5 }], { append: true }); // 8→5 回旧档
+  const badRuns = amapSt.speedLines.slice(before2).filter((l) => {
+    const lngs = (l.path || []).map((p) => p.lng);
+    return lngs.some((x) => x < 1.5) && lngs.some((x) => x > 1.5);
+  });
+  ok('速度跨档来回变化也不连飞线（任何一条线里不得同时含两段远处的点）',
+    badRuns.length === 0,
+    'badRuns=' + badRuns.length + ' total=' + (amapSt.speedLines.length - before2));
+
   ap.lightCell(22.55, 114.07);
   ap.lightCell(22.56, 114.08);
   ok('点亮走 OverlayGroup', !!amapSt.group && amapSt.group.overlays.length === 2);

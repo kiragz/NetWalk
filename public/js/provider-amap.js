@@ -192,9 +192,12 @@
       const li = this.speedColorIndex(spd);
       if (prev) {
         // 每段按速度独立上色：段 = [上一点, 当前点]，交界处两点重叠补缝。
-        // 线段写进「当前笔迹」——同一笔迹内的相邻点才相连；
-        // 断笔后（setTrack append / 新会话）会换新笔迹，绝不与上一段相连。
+        // 线段写进「当前笔迹」——同一笔迹内的相邻点才相连。
         const plo = this.speedColorIndex(this._lastSpd != null ? this._lastSpd : spd);
+        // ⚠ 速度档变化必须"提笔"（关闭全部当前笔迹再画边界段）：
+        // 否则速度回到旧档时，线段会追加进旧档那条笔迹的末尾，
+        // 把相距很远的两部分连进同一条线 —— 飞线的第二个来源（与换会话无关，纯速度波动就会触发）。
+        if (plo !== li) this._curRun = {};
         const seg = [new this.AMap.LngLat(prev.lng, prev.lat), cur];
         for (let k = Math.min(plo, li); k <= Math.max(plo, li); k++) {
           let line = this._curRun[k];
