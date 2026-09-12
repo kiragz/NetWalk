@@ -9,6 +9,8 @@
 
 **🪞 国内镜像**（克隆 / 浏览无需代理）：https://gitee.com/kiragz/NetWalk
 
+**📺 视频介绍**：【NETWALK「开源摸鱼神器：用网速和打字速度在真实地图上散步」】https://www.bilibili.com/video/BV1rJYd6kEJh/?share_source=copy_web&vd_source=55c11616b1aeb14d5166f02b07e17eb7
+
 把你的**下载/上传速率**和**打字速度**，换算成一个人在地图上的走路或奔跑速度，
 让一个分身在城市里替你走完这一天。走到路口就掷一次 **ROLL100**，由点数决定直行、左转、右转还是掉头。
 下班时点「结束」，生成当天的轨迹地图与数据日报。
