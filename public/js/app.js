@@ -98,7 +98,7 @@
     mailImapHost: $('mailImapHost'), mailImapPort: $('mailImapPort'),
     mailBoxStatus: $('mailBoxStatus'), btnMailStatus: $('btnMailStatus'), btnMailPush: $('btnMailPush'),
     autoMailArchive: $('autoMailArchive'), btnMailClean: $('btnMailClean'),
-    btnSnapTrack: $('btnSnapTrack'),
+    btnSnapTrack: $('btnSnapTrack'), btnFollow: $('btnFollow'),
     btnRgLogin: $('btnRgLogin'),
     btnSecClear: $('btnSecClear'), secHint: $('secHint'),
     mVisited: $('mVisited'), mLit: $('mLit'),
@@ -628,6 +628,10 @@
         };
         await p.init(el.map, { center: origin });
         state.provider = p;
+        // 地图自由拖动：用户拖动 → 自动解除镜头跟踪；🎯 按钮一键回到分身并恢复跟踪
+        if (p.map && p.map.on) {
+          p.map.on('dragstart', () => { setMapFollowing(false); });
+        }
         el.rowAmap.style.display = 'flex';
         updateAmapCalls();
         el.pillMap.textContent = '高德路网 · 加载中';
@@ -1025,6 +1029,13 @@
     } finally {
       btn.disabled = false; btn.textContent = old;
     }
+  }
+
+  /** 地图镜头跟踪开关：拖动地图自动解除；🎯 按钮恢复跟踪 */
+  function setMapFollowing(on) {
+    state.following = Boolean(on);
+    if (state.provider && state.provider.setFollow) state.provider.setFollow(state.following);
+    if (el.btnFollow) el.btnFollow.classList.toggle('on', state.following);
   }
 
   function onEngineUpdate(s) {
@@ -1762,6 +1773,17 @@
 
     // 数据
     el.btnStats.addEventListener('click', openStats);
+    // 🎯 回到分身并恢复镜头跟踪（拖动地图后用）
+    if (el.btnFollow) {
+      el.btnFollow.addEventListener('click', () => {
+        setMapFollowing(true);
+        const pos = (state.engine && state.engine.pos) || state.origin;
+        try {
+          if (state.provider && state.provider.map && state.provider.map.setCenter) state.provider.map.setCenter([pos.lng, pos.lat]);
+        } catch (_) { /* noop */ }
+        log('已回到分身位置，恢复镜头跟踪');
+      });
+    }
     el.btnStatsClose.addEventListener('click', () => el.maskStats.classList.remove('show'));
     el.maskStats.addEventListener('click', (e) => { if (e.target === el.maskStats) el.maskStats.classList.remove('show'); });
     // 轨迹整备：两步确认（会改写历史轨迹的形状与路名，统计不变）

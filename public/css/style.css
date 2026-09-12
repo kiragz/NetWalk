@@ -460,3 +460,22 @@ html, body {
 .ver-list { margin: 0; padding-left: 16px; font-size: 11px; line-height: 1.65; color: var(--txt-dim); }
 .ver-list li { margin-bottom: 2px; }
 .ver-list b { color: var(--txt); font-weight: 600; }
+
+/* 地图右下角：回到分身/跟踪按钮（拖动地图自由查看，点此恢复跟踪） */
+#btnFollow {
+  position: fixed;
+  right: 18px;
+  bottom: 18px;
+  z-index: 260;
+  width: 44px;
+  height: 44px;
+  border-radius: 50%;
+  border: 1px solid var(--line, #2a3550);
+  background: rgba(10, 15, 26, 0.82);
+  color: #8b98b5;
+  font-size: 20px;
+  cursor: pointer;
+  transition: all 0.15s;
+}
+#btnFollow:hover { background: rgba(30, 40, 66, 0.95); color: #fff; }
+#btnFollow.on { color: #3ddc97; border-color: #3ddc97; box-shadow: 0 0 10px rgba(61, 220, 151, 0.35); }

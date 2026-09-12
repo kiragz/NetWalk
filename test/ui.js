@@ -294,6 +294,11 @@ const shown = (id) => $(id).classList.contains('show');
   });
   await e1._planNext(true);
   ok('重复路也照常规划（方向由 ROLL 决定，不卡死）', !!e1.route);
+  // 0.9.18：地图自由拖动 / 回到分身按钮
+  ok('btnFollow 按钮存在', !!doc.getElementById('btnFollow'));
+  $('btnFollow').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(100);
+  ok('点击 🎯 后进入跟踪态（绿色 on）', $('btnFollow').classList.contains('on'));
   ok('ROLL 记录保存新路占比（诊断用）', e1.stats.rolls === 1, 'rolls=' + e1.stats.rolls);
   e1.stop();
 
