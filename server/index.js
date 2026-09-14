@@ -1,4 +1,4 @@
-/**
+﻿/**
  * NetWalk 服务端
  * 职责：采集真实网速/击键 → WebSocket 推送；接收前端轨迹并落盘；生成日报。
  */
@@ -183,7 +183,9 @@ app.use(staticMiddleware(STATIC_DIR));
 const net = new NetMonitor({ intervalMs: 1000 });
 const keys = new KeyMonitor();
 const store = new TrackStore(ACTIVE_DATA);
+const { PlaceStore } = require('./places');
 const achStore = new AchievementStore(ACTIVE_DATA);
+const placeStore = new PlaceStore(ACTIVE_DATA);
 
 /** 把 range + date 解析成日期闭区间 */
 function rangeToBounds(range, date) {
@@ -691,6 +693,29 @@ app.post('/api/session/start', (req, res) => {
 });
 
 /** 全部出发点（跨天），主地图/轨迹回看画紫点用 */
+/** 地点收集册：收录 / 按天查询 / 汇总 */
+app.post('/api/places/add', (req, res) => {
+  const body = req.body || {};
+  try {
+    const added = placeStore.add(body.date || todayStr(), body.places || []);
+    if (added) logLine(`places add: ${body.date || todayStr()} +${added}`);
+    res.json({ ok: true, added });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e && e.message ? e.message : String(e) });
+  }
+});
+
+app.get('/api/places', (req, res) => {
+  const to = String(req.query.to || todayStr()).slice(0, 10);
+  const from = String(req.query.from || to).slice(0, 10);
+  res.json(placeStore.range(from, to));
+});
+
+app.get('/api/places/summary', (req, res) => {
+  const to = String(req.query.to || todayStr()).slice(0, 10);
+  const from = String(req.query.from || to).slice(0, 10);
+  res.json(placeStore.summary(from, to));
+});
 app.get('/api/sessions', (req, res) => {
   res.json({ ok: true, starts: store.allSessionStarts() });
 });

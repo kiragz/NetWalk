@@ -99,7 +99,7 @@
     mailBoxStatus: $('mailBoxStatus'), btnMailStatus: $('btnMailStatus'), btnMailPush: $('btnMailPush'),
     autoMailArchive: $('autoMailArchive'), hourlyMailArchive: $('hourlyMailArchive'), btnMailClean: $('btnMailClean'),
     btnSnapTrack: $('btnSnapTrack'), btnFollow: $('btnFollow'),
-    btnRepairUndo: $('btnRepairUndo'),
+    btnRepairUndo: $('btnRepairUndo'), btnAlbum: $('btnAlbum'), maskAlbum: $('maskAlbum'), albumBody: $('albumBody'), albumSummary: $('albumSummary'), albumTabs: $('albumTabs'), btnAlbumClose: $('btnAlbumClose'),
     maskSyncFirst: $('maskSyncFirst'), btnSyncFirstGo: $('btnSyncFirstGo'), btnSyncFirstSkip: $('btnSyncFirstSkip'), syncFirstHint: $('syncFirstHint'),
     btnRepairArea: $('btnRepairArea'), btnRepairGo: $('btnRepairGo'), btnRepairCancel: $('btnRepairCancel'),
     repairInfo: $('repairInfo'), repairBar: $('repairBar'), pickBox: $('pickBox'), netBanner: $('netBanner'),
@@ -117,6 +117,9 @@
     autoPausedByNet: false,   // 断网自动暂停标记（恢复联网后自动继续）
     lastMail: null,           // 上次「结束漫游」的自动发信结果 { ok, to, error }
     syncPromptDone: false,    // 本次会话是否已问过「要不要先同步存档」
+    poiTimer: null,           // 地点收集定时器
+    albumRange: 'all',        // 收集册显示范围：all / day
+    lastCollectPos: null,     // 上次采集位置（避免原地重复采）
     netAvailable: false,
     keyMode: 'none',
     channel: ('BroadcastChannel' in window) ? new BroadcastChannel('netwalk') : null,
@@ -611,6 +614,8 @@
     window.NetWalkDebug = {
       state,
       resetSyncPrompt() { state.syncPromptDone = false; },
+      poiCat,
+      pickFormalPois,
       repairArea,
       loadAllDays,
       drawHistoryOnMap,
@@ -962,6 +967,7 @@
     engine.start();
     state.started = true;
     el.btnStart.disabled = true;
+    startPlaceCollector();   // 路过正式场所自动收集
     el.btnPause.disabled = false;
     el.btnEnd.disabled = false;
     el.btnPause.textContent = '暂停';
@@ -1409,6 +1415,109 @@
   }
 
   /** 地图镜头跟踪开关：拖动地图自动解除；🎯 按钮恢复跟踪 */
+  // ---------- 地点收集册：路过正式场所自动收录 ----------
+  const POI_CATS = [
+    ['图书馆', /图书馆/],
+    ['博物馆', /博物馆|科技馆|美术馆|展览馆|纪念馆|文化馆/],
+    ['医院', /医疗保健|医院|卫生服务中心/],
+    ['大学', /高等院校|大学|学院/],
+    ['中学', /中学/],
+    ['小学', /小学/],
+    ['政府机关', /政府机关|人民政府|政府部门/],
+    ['车站', /火车站|地铁站|长途汽车站/],
+    ['体育场馆', /体育场|体育馆|运动场馆/],
+    ['地标景点', /风景名胜|公园|广场|文物|标志性建筑/],
+  ];
+  const CAT_ICONS = { '医院': '🏥', '中学': '🏫', '小学': '🏫', '大学': '🎓', '图书馆': '📚', '博物馆': '🏛️', '政府机关': '🏢', '车站': '🚉', '体育场馆': '🏟️', '地标景点': '🏞️' };
+
+  function poiCat(type) {
+    const t = String(type || '');
+    for (const [cat, re] of POI_CATS) if (re.test(t)) return cat;
+    return '';
+  }
+
+  /** 从高德逆地理返回的 POI 里挑出正式场所，并按名称去重 */
+  function pickFormalPois(pois, pos) {
+    const out = [];
+    const seen = new Set();
+    for (const poi of (pois || [])) {
+      const name = String(poi.name || '').trim();
+      const cat = poiCat(poi.type);
+      if (!name || !cat || seen.has(name)) continue;
+      seen.add(name);
+      const loc = poi.location || {};
+      let lat = Number(loc.lat != null ? loc.lat : (loc.getLat ? loc.getLat() : pos.lat));
+      let lng = Number(loc.lng != null ? loc.lng : (loc.getLng ? loc.getLng() : pos.lng));
+      if (!Number.isFinite(lat) || !Number.isFinite(lng)) { lat = pos.lat; lng = pos.lng; }
+      out.push({ name: name.slice(0, 60), cat, lat, lng, t: Date.now() });
+    }
+    return out;
+  }
+
+  async function collectPlacesNow() {
+    if (!state.started || !state.provider || state.provider.name !== 'amap') return;
+    const pos = (state.engine && state.engine.pos) || null;
+    if (!pos || !Number.isFinite(pos.lat)) return;
+    if (state.lastCollectPos) {
+      const moved = haversineKm(state.lastCollectPos, pos) * 1000;
+      if (moved < 150) return;   // 没走出 150 米就不重复采
+    }
+    state.lastCollectPos = { lat: pos.lat, lng: pos.lng };
+    try {
+      const pois = await state.provider.nearbyPlaces(pos);
+      const list = pickFormalPois(pois, pos);
+      if (!list.length) return;
+      const w = await postJson('/api/places/add', { date: today(), places: list }, 8000);
+      if (w && w.added) {
+        log(`📔 收集到 ${w.added} 个正式地点：` + list.slice(0, 3).map((p) => (CAT_ICONS[p.cat] || '📍') + p.name).join('、') + (list.length > 3 ? ' 等' : ''));
+      }
+    } catch (_) { /* 采集失败不影响行走 */ }
+  }
+
+  function startPlaceCollector() {
+    stopPlaceCollector();
+    state.poiTimer = setInterval(collectPlacesNow, 45000);
+    setTimeout(collectPlacesNow, 15000);   // 出发后 15 秒先采一次
+  }
+
+  function stopPlaceCollector() {
+    if (state.poiTimer) { clearInterval(state.poiTimer); state.poiTimer = null; }
+    state.lastCollectPos = null;
+  }
+
+  // ---------- 地点收集册浮层 ----------
+  let albumCache = null;
+  function albumCatIcon(cat) { return CAT_ICONS[cat] || '📍'; }
+
+  async function openAlbum() {
+    if (el.maskAlbum) el.maskAlbum.classList.add('show');
+    if (el.albumSummary) el.albumSummary.textContent = '加载中…';
+    if (el.albumBody) el.albumBody.innerHTML = '<div class="hint">加载中…</div>';
+    try {
+      albumCache = await fetchJson('/api/places/summary?from=0000-01-01&to=' + today(), 8000);
+      renderAlbum();
+    } catch (e) {
+      if (el.albumSummary) el.albumSummary.textContent = '加载失败：' + (e && e.message ? e.message : e);
+    }
+  }
+
+  function renderAlbum() {
+    const days = (albumCache && albumCache.list) || [];
+    const shown = (state.albumRange === 'day') ? days.filter((d) => d.date === today()).slice(0, 1) : days;
+    let total = 0;
+    const byCat = {};
+    for (const d of shown) for (const p of d.places) { total++; byCat[p.cat] = (byCat[p.cat] || 0) + 1; }
+    if (el.albumSummary) el.albumSummary.textContent = total
+      ? `共 ${total} 个地点 · ${shown.length} 天 · ` + Object.entries(byCat).map(([k, v]) => `${albumCatIcon(k)}${k} ${v}`).join(' · ')
+      : '还没有收集到正式地点（高德模式下行走时自动收集）';
+    if (el.albumBody) {
+      el.albumBody.innerHTML = shown.map((d) => [
+        `<div style="margin:10px 0 4px;font-weight:700">📅 ${d.date} · ${d.places.length} 个</div>`,
+        d.places.map((p) => `<div style="padding:3px 0;color:var(--txt-dim)">${albumCatIcon(p.cat)} <b style="color:var(--txt)">${p.name}</b> <span style="opacity:.7">· ${p.cat}</span></div>`).join(''),
+      ].join('')) || '<div class="hint">暂无记录</div>';
+    }
+  }
+
   function setMapFollowing(on) {
     state.following = Boolean(on);
     if (state.provider && state.provider.setFollow) state.provider.setFollow(state.following);
@@ -1465,6 +1574,7 @@
     el.btnStart.disabled = false;
     el.btnPause.disabled = true;
     el.btnEnd.disabled = true;
+    stopPlaceCollector();
 
     try {
       const endRes = await fetch('/api/session/end', {
@@ -2168,6 +2278,16 @@
 
     // 数据
     el.btnStats.addEventListener('click', openStats);
+    el.btnAlbum.addEventListener('click', openAlbum);
+    el.btnAlbumClose.addEventListener('click', () => { if (el.maskAlbum) el.maskAlbum.classList.remove('show'); });
+    if (el.albumTabs) el.albumTabs.addEventListener('click', (e) => {
+      const btn = e.target.closest && e.target.closest('.ach-tab');
+      if (!btn) return;
+      [...el.albumTabs.children].forEach((c) => c.classList.toggle('on', c === btn));
+      state.albumRange = btn.dataset.range || 'all';
+      renderAlbum();
+    });
+    el.maskAlbum.addEventListener('click', (e) => { if (e.target === el.maskAlbum) el.maskAlbum.classList.remove('show'); });
     // 🎯 回到分身并恢复镜头跟踪（拖动地图后用）
     if (el.btnFollow) {
       el.btnFollow.addEventListener('click', () => {

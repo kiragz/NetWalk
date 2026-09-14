@@ -348,6 +348,24 @@
       });
     }
 
+    /** 逆地理取附近的正式场所 POI（医院/学校/地标等，供地点收集册用） */
+    nearbyPlaces(pos) {
+      return new Promise((resolve) => {
+        if (!this._ready || !this.geocoder) return resolve([]);
+        if (!this._charge('geocode')) return resolve([]);
+        let done = false;
+        const finish = (v) => { if (!done) { done = true; resolve(v); } };
+        const timer = setTimeout(() => finish([]), 8000);
+        try {
+          this.geocoder.getAddress([pos.lng, pos.lat], (status, result) => {
+            clearTimeout(timer);
+            if (status !== 'complete' || !result || !result.regeocode) return finish([]);
+            finish(result.regeocode.pois || []);
+          });
+        } catch (err) { clearTimeout(timer); finish([]); }
+      });
+    }
+
     /** 单次地理编码（内部用）：严格用 2 参数调用，与早期可用写法保持一致 */
     _geocodeOnce(text, timeoutMs) {
       return new Promise((resolve) => {

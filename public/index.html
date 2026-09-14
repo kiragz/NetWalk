@@ -21,7 +21,7 @@
   <header class="topbar" data-page-node-id="ddrJhtR5e5RhxcM4HEN3M4">
     <div class="brand" data-page-node-id="8DH2ofHV66qbHEOc2uAOXh">Net<span data-page-node-id="Gt7m3YCBqixEngqyYKio6f">Walk</span></div>
     <button class="ver-pill" id="btnAccount" title="账号与档案">👤 未登录</button>
-    <button class="ver-pill" id="btnVersion" title="查看版本更新概要">v0.9.27</button>
+    <button class="ver-pill" id="btnVersion" title="查看版本更新概要">v0.9.28</button>
     <div class="pill" id="pillMap" data-page-node-id="GjTS25Bi1mrlBafIXfCBl3">地图加载中</div>
     <div class="pill" id="pillNet" data-page-node-id="Snjd11zKSBJFXSszeLhDMN">网络采集中</div>
     <div class="pill" id="pillKey" data-page-node-id="h2AOMKNxwH67HjkAsxSCgU">击键采集中</div>
@@ -282,6 +282,23 @@
   </div>
 </div>
 
+<!-- 地点收集册 -->
+<div class="modal-mask" id="maskAlbum">
+  <div class="modal">
+    <h2>📔 地点收集册</h2>
+    <div class="desc">路过医院、学校、标志性建筑等正式场所时自动收录（高德模式下行走时生效）。</div>
+    <div class="ach-tabs" id="albumTabs">
+      <button class="ach-tab on" data-range="all">全部</button>
+      <button class="ach-tab" data-range="day">本日</button>
+    </div>
+    <div id="albumSummary" class="hint" style="margin:6px 0"></div>
+    <div id="albumBody" style="max-height:46vh;overflow:auto"></div>
+    <div class="modal-acts">
+      <button class="btn primary" id="btnAlbumClose">关闭</button>
+    </div>
+  </div>
+</div>
+
 <!-- 结束浮层 -->
 <div class="modal-mask" id="maskSyncFirst" data-page-node-id="syncFirstMask">
   <div class="modal" data-page-node-id="syncFirstModal">
@@ -375,6 +392,7 @@
     <div class="modal-acts" data-page-node-id="Jq351zElvaAVjqqAciFJsX">
       <button class="btn" id="btnRepairArea" title="在地图上拖拽框选区域，只把框内的轨迹重新吸附到道路上">🩹 区域修复</button>
       <button class="btn" id="btnRepairUndo" title="恢复成上一次区域修复之前的轨迹（只对修复过的当天有效）">↩ 撤销修复</button>
+      <button class="btn" id="btnAlbum" title="查看路过收集的医院/学校/地标等正式地点">📔 地点收集册</button>
       <button class="btn primary" id="btnStatsClose" data-page-node-id="4VLyMIuq83vyRCqfbLb16P">关闭</button>
     </div>
   </div>
