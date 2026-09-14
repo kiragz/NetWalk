@@ -4,6 +4,8 @@
  *      用于未配置高德 Key 时完整体验玩法。路名均为虚构。
  */
 (function (global) {
+  // 重叠热力色（与高德 provider 一致：2/3/4/5+ 次）
+  const HEAT_COLORS = ['#3ad9ff', '#3ddc97', '#a97bff', '#ff5cc8'];
   'use strict';
 
   const M_PER_DEG_LAT = 111320;
@@ -232,8 +234,8 @@
     setVisitLookup(fn) { this._visitLookup = typeof fn === 'function' ? fn : null; }
 
     /** 热力色下标：重叠 >=2 次用 dTrack10..13（青/绿/紫/洋红），否则 -1（用速度色） */
-    _heatIndex(key) {
-      const n = (key && this._visitLookup) ? Number(this._visitLookup(key)) || 0 : 0;
+    _heatIndex(key, lat, lng) {
+      const n = this._visitLookup ? Number(this._visitLookup(key, lat, lng)) || 0 : 0;
       if (n < 2) return -1;
       if (n >= 5) return 13;
       if (n === 4) return 12;
@@ -251,15 +253,20 @@
         const pw = this.toWorld(prev.lat, prev.lng);
         const px = (pw.x * this.ppm).toFixed(1);
         const py = (pw.y * this.ppm).toFixed(1);
-        const hi = this._heatIndex(roadKey);
+        const hi = this._heatIndex(roadKey, lat, lng);
         const li = hi >= 0 ? hi : this.speedColorIndex(spd);
-        const lo = this.speedColorIndex(this._lastSpd != null ? this._lastSpd : spd);
-        for (let k = Math.min(li, lo); k <= Math.max(li, lo); k++) {
+        // 用「上一段实际画出的颜色档」判断（热力色参与时不能用速度档，否则会跨多档重复画）
+        const lo = this._lastIdx != null ? this._lastIdx : li;
+        const heatBase = 14 - HEAT_COLORS.length;
+        const from = (lo < heatBase && li < heatBase) ? Math.min(li, lo) : li;
+        const to = (lo < heatBase && li < heatBase) ? Math.max(li, lo) : li;
+        for (let k = from; k <= to; k++) {
           const el = this.svg.querySelector('#dTrack' + k);
           if (el) el.setAttribute('d', (el.getAttribute('d') || '') + ` M${px},${py} L${x},${y}`);
         }
       }
       this._lastSpd = spd;
+      this._lastIdx = li;
       this._trackCount++;
       if (this._trackCount > 6000) {
         // 轨迹过长时截断，避免 DOM 无限膨胀（各色 path 只保留最近 4000 段）
@@ -299,6 +306,7 @@
           if (el) el.setAttribute('d', '');
         }
         this._lastSpd = null;
+        this._lastIdx = null;
         if (this.trackEl) this.trackEl.setAttribute('d', '');
       }
       // append=true：追加新的一段（不断笔也绝不与上一段相连 —— 每对点都是独立的 M+L 子路径）

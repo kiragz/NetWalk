@@ -97,8 +97,9 @@
     mailPass: $('mailPass'), btnMailSave: $('btnMailSave'), mailHint: $('mailHint'),
     mailImapHost: $('mailImapHost'), mailImapPort: $('mailImapPort'),
     mailBoxStatus: $('mailBoxStatus'), btnMailStatus: $('btnMailStatus'), btnMailPush: $('btnMailPush'),
-    autoMailArchive: $('autoMailArchive'), btnMailClean: $('btnMailClean'),
+    autoMailArchive: $('autoMailArchive'), hourlyMailArchive: $('hourlyMailArchive'), btnMailClean: $('btnMailClean'),
     btnSnapTrack: $('btnSnapTrack'), btnFollow: $('btnFollow'),
+    maskSyncFirst: $('maskSyncFirst'), btnSyncFirstGo: $('btnSyncFirstGo'), btnSyncFirstSkip: $('btnSyncFirstSkip'), syncFirstHint: $('syncFirstHint'),
     btnRepairArea: $('btnRepairArea'), btnRepairGo: $('btnRepairGo'), btnRepairCancel: $('btnRepairCancel'),
     repairInfo: $('repairInfo'), repairBar: $('repairBar'), pickBox: $('pickBox'), netBanner: $('netBanner'),
     btnRgLogin: $('btnRgLogin'),
@@ -115,11 +116,11 @@
     autoPausedByNet: false,   // 断网自动暂停标记（恢复联网后自动继续）
     roadVisits: {},           // 路段 → 走过次数（重叠热力着色）
     sessionRuns: {},          // 本次行走中各路段已走完的遍数（兼容旧字段）
-    sessionCells: {},         // 本次行走中各热力网格已走完的遍数
-    sessionRoads: {},         // 本次行走中同名道路已走完的遍数
-    lastCellKey: '',          // 当前所在热力网格
+    sessionKeys: {},          // 本次行走中各路段键已走完的遍数
+    lastHeatKey: '',          // 当前所在路段键
     lastRoadKey: '',          // 当前所在路段（用于统计本次行走的遍数）
     lastMail: null,           // 上次「结束漫游」的自动发信结果 { ok, to, error }
+    syncPromptDone: false,    // 本次会话是否已问过「要不要先同步存档」
     netAvailable: false,
     keyMode: 'none',
     channel: ('BroadcastChannel' in window) ? new BroadcastChannel('netwalk') : null,
@@ -263,6 +264,7 @@
       if (el.mailImapHost) el.mailImapHost.value = cfg.mailImapHost || '';
       if (el.mailImapPort) el.mailImapPort.value = cfg.mailImapPort || '';
       if (el.autoMailArchive) el.autoMailArchive.checked = cfg.autoMailArchive !== false;
+      if (el.hourlyMailArchive) el.hourlyMailArchive.checked = cfg.hourlyMailArchive !== false;   // 默认开
       el.mailHint.textContent = cfg.mailConfigured
         ? '已配置 ✓ 结束漫游 / 点「上传存档」时会把存档码发到邮箱'
         : '';
@@ -578,7 +580,12 @@
     bindUi();
     initNetWatch();
     // 供测试/外部调用的纯函数（区域修复的分段与判定逻辑）
-    window.NetWalkRepairUtil = { splitByDistance, insideBounds, countInBounds, segKey: cellKey, cellKey, buildRoadVisits, overlapCount, nextPieceIndex, visitsAt };
+    // 排障/自动化测试钩子：只读状态 + 重置「出发前同步提示」
+    window.NetWalkDebug = {
+      state,
+      resetSyncPrompt() { state.syncPromptDone = false; },
+    };
+    window.NetWalkRepairUtil = { splitByDistance, insideBounds, countInBounds, segKey: cellKey, cellKey, heatKey, buildRoadVisits, overlapCount, nextPieceIndex, visitsAt };
     bindProfileUi();
     setupLocalKeyFallback();
     checkProfile();
@@ -844,8 +851,35 @@
     return null;
   }
 
+  /**
+   * 要不要在出发前问「先同步存档」：
+   * 本机没有任何轨迹 + 已配置 IMAP 邮箱 + 不是重置后的免同步状态 + 不是脚本自动出发。
+   */
+  async function shouldPromptSyncFirst() {
+    if (state.syncPromptDone) return false;              // 本次会话已经问过/已选择
+    if (localStorage.getItem('netwalkNoAutoSync') === '1') return false;   // 刚重置：明确不要再拉旧存档
+    try {
+      if (new URLSearchParams(location.search).get('autostart')) return false;   // 脚本/演示自动出发
+    } catch (_) { /* noop */ }
+    try {
+      const st = await fetch('/api/mailbox/status').then((x) => x.json()).catch(() => null);
+      if (!st || !st.imapConfigured) return false;       // 没配 IMAP → 没得同步
+      const r = await fetch('/api/track/range?from=0000-01-01&to=' + today()).then((x) => x.json()).catch(() => null);
+      const days = (r && r.days) || [];
+      const pts = days.reduce((n, d) => n + ((d.path || []).length), 0);
+      return pts < 2;                                    // 本机确实是空的
+    } catch (_) { return false; }
+  }
+
+  function openSyncPrompt() {
+    state.syncPromptDone = true;
+    if (el.maskSyncFirst) el.maskSyncFirst.classList.add('show');
+  }
+
   async function startWalk() {
     if (!state.provider) return;
+    // 新设备忘了同步：本机没有任何轨迹但配了邮箱存档 → 先问一句
+    if (await shouldPromptSyncFirst()) { openSyncPrompt(); return; }
     await pullArchiveFromMailbox();
     // 拉取今日已走过的路（本轮不再重复走）+ 上次结束位置（跨天也继续）
     let visitedRoads = [];
@@ -858,10 +892,9 @@
     const origin = resume || state.origin;
     // 实时重叠着色：历史遍数 + 本次行走已走完的遍数 + 当前这一遍
     state.sessionRuns = {};
-    state.sessionCells = {};
-    state.sessionRoads = {};
+    state.sessionKeys = {};
     state.lastRoadKey = '';
-    state.lastCellKey = '';
+    state.lastHeatKey = '';
     if (state.provider.setVisitLookup) state.provider.setVisitLookup(visitCountLive);
     const engine = new window.RoamEngine({
       provider: state.provider,
@@ -955,7 +988,7 @@
       const days = (r && r.days) || [];
       const flat = days.flatMap((d) => d.path || []);
       // 重叠统计要在绘制之前算好：同一条路走过 ≥2 次用热力色（青/绿/紫/洋红）
-      state.roadVisits = buildRoadVisits(days);
+      state.roadVisits = buildRoadVisits(days, Number(r && r.resetAt) || 0);
       if (state.provider.setVisitLookup) state.provider.setVisitLookup(visitCountHistory);
       if (flat.length < 2) { log('地图上还没有历史轨迹，本次行走将开始画线'); }
       else {
@@ -974,31 +1007,44 @@
   }
 
   // ---------- 重叠热力：同一条路走过几次 ----------
-  // 判定口径（两者取较大值，避免漏判）：
-  //   ① 几何网格：~30 米一格，跨天再走同一条街就会落在同一格里（最可靠，不依赖路名）
-  //   ② 路名：同名道路再走一遍也算一次（用于路名清晰、但两次走法略有偏差的情况）
-  const HEAT_CELL = 0.0003;   // ≈33m(纬) / ≈30m(经，广州纬度)
+  // 口径（刻意只用一个键，避免同一条街中段突然变色）：
+  //   · 有路名 → 按路名计数（整条街一个颜色，符合"这条路走过 2 次"的直觉）
+  //   · 没路名 → 按 ~55m 网格计数（够粗，跨天再走同一条街也落在同格）
+  // 另加两条规则：① 距离很近就回到同一格不算新的一遍（抗 GPS/规划点抖动）
+  //              ② 重置时刻之前的点不参与统计（按重置后的数据判定）
+  const HEAT_CELL = 0.0005;      // ≈55m(纬) / ≈50m(经，广州纬度)
+  const HEAT_JITTER_GAP = 6;     // 6 个点之内回到同一格视为同一遍
 
   function cellKey(p) {
     if (!Number.isFinite(p && p.lat) || !Number.isFinite(p && p.lng)) return '';
     return Math.round(p.lat / HEAT_CELL) + ',' + Math.round(p.lng / HEAT_CELL);
   }
 
-  /** 统计每个网格 / 每条路走过的次数：跨天累加，同一天内连续同一格只算一遍 */
-  function buildRoadVisits(days) {
+  /** 统一键：有路名用路名，否则用网格 */
+  function heatKey(p) {
+    const r = String((p && p.road) || '').trim();
+    if (r) return 'R:' + r;
+    return cellKey(p);
+  }
+
+  /** 统计每个路段走过的次数：跨天/跨会话累加，同一天内连续同一键只算一遍 */
+  function buildRoadVisits(days, resetAt) {
     const visits = {};
     for (const day of (days || [])) {
       const path = (day && day.path) || [];
-      let prevCell = null, prevRoad = null;
-      for (const p of path) {
-        const c = cellKey(p);
-        if (c && c !== prevCell) visits[c] = (visits[c] || 0) + 1;
-        prevCell = c;
-        const r = String(p.road || '').trim();
-        if (r) {
-          if (r !== prevRoad) visits['R:' + r] = (visits['R:' + r] || 0) + 1;
-          prevRoad = r;
-        } else prevRoad = null;
+      let prevKey = null;
+      const lastIdx = {};
+      for (let idx = 0; idx < path.length; idx++) {
+        const p = path[idx];
+        if (resetAt && Number(p.t) > 0 && Number(p.t) < resetAt) { prevKey = null; continue; }
+        const key = heatKey(p);
+        if (!key) { prevKey = null; continue; }
+        if (key !== prevKey) {
+          const last = lastIdx[key];
+          if (last === undefined || idx - last > HEAT_JITTER_GAP) visits[key] = (visits[key] || 0) + 1;
+          lastIdx[key] = idx;
+        }
+        prevKey = key;
       }
     }
     return visits;
@@ -1006,16 +1052,12 @@
 
   /** 某点的重叠次数：includeCurrent=true 时把"当前这一遍"也算上（实时绘制用） */
   function visitsAt(key, lat, lng, includeCurrent) {
-    const c = (Number.isFinite(lat) && Number.isFinite(lng)) ? cellKey({ lat, lng }) : '';
-    const histC = c ? (state.roadVisits[c] || 0) : 0;
-    const histR = key ? (state.roadVisits['R:' + key] || 0) : 0;
-    let n = Math.max(histC, histR);
-    if (includeCurrent) {
-      const sesC = c ? (state.sessionCells[c] || 0) : 0;
-      const sesR = key ? (state.sessionRoads[key] || 0) : 0;
-      n = Math.max(histC + sesC, histR + sesR) + 1;
-    }
-    return n;
+    const k = String(key || '').trim() ? ('R:' + String(key).trim()) : cellKey({ lat, lng });
+    if (!k) return 0;
+    const hist = (state.roadVisits && state.roadVisits[k]) || 0;
+    if (!includeCurrent) return hist;
+    const done = (state.sessionKeys && state.sessionKeys[k]) || 0;
+    return hist + done + 1;
   }
 
   /** 历史绘制用：该点已经走过几次 */
@@ -1024,7 +1066,7 @@
   /** 实时绘制用：历史 + 本次已完成遍数 + 当前这一遍 */
   function visitCountLive(key, lat, lng) { return visitsAt(key, lat, lng, true); }
 
-  /** 重叠点数（用于日志提示） */
+  /** 重叠条目数（用于日志提示） */
   function overlapCount(visits) {
     let n = 0;
     for (const k in visits) if (visits[k] >= 2) n++;
@@ -1358,19 +1400,16 @@
   }
 
   function onEngineUpdate(s) {
-    // 记录本次行走经过的网格/道路（重叠热力着色：同一处再走一遍就变热色）
-    if (Number.isFinite(s.lat) && Number.isFinite(s.lng)) {
-      const ck = cellKey(s);
-      if (ck && ck !== state.lastCellKey) {
-        if (state.lastCellKey) state.sessionCells[state.lastCellKey] = (state.sessionCells[state.lastCellKey] || 0) + 1;
-        state.lastCellKey = ck;
+    // 记录本次行走经过的路段（重叠热力着色：同一处再走一遍就变热色）
+    {
+      const hk = heatKey(s);
+      if (hk && hk !== state.lastHeatKey) {
+        if (state.lastHeatKey) state.sessionKeys[state.lastHeatKey] = (state.sessionKeys[state.lastHeatKey] || 0) + 1;
+        state.lastHeatKey = hk;
       }
     }
     if (s.road && s.road !== state.lastRoadKey) {
-      if (state.lastRoadKey) {
-        state.sessionRuns[state.lastRoadKey] = (state.sessionRuns[state.lastRoadKey] || 0) + 1;
-        state.sessionRoads[state.lastRoadKey] = (state.sessionRoads[state.lastRoadKey] || 0) + 1;
-      }
+      if (state.lastRoadKey) state.sessionRuns[state.lastRoadKey] = (state.sessionRuns[state.lastRoadKey] || 0) + 1;
       state.lastRoadKey = s.road;
     }
     const modes = window.NetWalkSpeed.MODES;
@@ -2137,6 +2176,39 @@
     el.btnStatsClose.addEventListener('click', () => el.maskStats.classList.remove('show'));
     el.maskStats.addEventListener('click', (e) => { if (e.target === el.maskStats) el.maskStats.classList.remove('show'); });
     bindAreaRepairUi();
+    // 新设备出发提示：先同步存档 or 直接出发
+    if (el.btnSyncFirstGo) {
+      el.btnSyncFirstGo.addEventListener('click', async () => {
+        if (el.maskSyncFirst) el.maskSyncFirst.classList.remove('show');
+        el.btnSyncFirstGo.disabled = true;
+        const old = el.btnSyncFirstGo.textContent;
+        el.btnSyncFirstGo.textContent = '同步中…';
+        try {
+          log('📥 先同步邮箱存档，再出发…');
+          const r = await syncFromMailbox();
+          if (r && r.ok) {
+            log(`已同步${r.pulled ? '（' + r.pulled + '）' : ''}`
+              + (r.sessionCount ? `，累计出发 ${r.sessionCount} 次` : '')
+              + (r.resume ? `，将从 ${r.resume.date} 的结束点继续` : ''));
+          } else if (r && r.error) {
+            log('同步失败：' + r.error + '（仍可继续出发）');
+          }
+        } catch (e) {
+          log('同步失败：' + (e && e.message ? e.message : e) + '（仍可继续出发）');
+        } finally {
+          el.btnSyncFirstGo.disabled = false;
+          el.btnSyncFirstGo.textContent = old;
+        }
+        await startWalk();
+      });
+    }
+    if (el.btnSyncFirstSkip) {
+      el.btnSyncFirstSkip.addEventListener('click', () => {
+        if (el.maskSyncFirst) el.maskSyncFirst.classList.remove('show');
+        log('已选择直接出发（本次不再提示；想同步可在「账号与档案」点「一键同步」，两边会自动合并）');
+        startWalk();
+      });
+    }
     // 手动暂停/继续：用户的意图优先，清掉断网自动暂停标记（避免联网后又被自动恢复）
     if (el.btnPause) {
       el.btnPause.addEventListener('click', () => { state.autoPausedByNet = false; hideNetBanner(); });
@@ -2515,6 +2587,7 @@ el.btnReport.addEventListener('click', () => {
       const pass = el.mailPass.value.trim();
       if (pass) body.mailPass = pass;   // 留空 = 保持原配置
       if (el.autoMailArchive) body.autoMailArchive = el.autoMailArchive.checked;
+      if (el.hourlyMailArchive) body.hourlyMailArchive = el.hourlyMailArchive.checked;
       if (!body.mailSmtpHost || !body.mailUser || (!pass && el.mailPass.placeholder.indexOf('已配置') < 0)) {
         el.mailHint.textContent = '服务器、账号、授权码都要填（端口默认 465）';
         return;

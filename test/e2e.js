@@ -283,6 +283,56 @@ async function main() {
   const ss13 = await J('/api/sessions');
   ok('13.5 出发记录也随接管更新为对端的', (ss13.starts || []).length === 1, 'starts=' + (ss13.starts || []).length);
 
+  console.log('\n== 14. 新设备忘按同步就先走一段，之后再同步 ==');
+  // 场景：本机（新设备）忘了同步就出发走了一段 → 之后点「一键同步」导入邮箱存档。
+  // 期望：两边数据都在（合并，不丢）；续走点按【时间戳】取最新而不是导入顺序；出发序号全局重排。
+  const sn14 = await post('/api/session/start', { date: today, city: '深圳', scope: 'city', lat: 22.60, lng: 114.10 });
+  const tLocal = Date.now() + 60000;   // 本机这段比存档里的点更新
+  await post('/api/track/path', { date: today, points: [
+    { t: tLocal, lat: 22.60, lng: 114.10, road: '新设备路', spd: 5, mode: 'walk', no: sn14.sessionNo },
+    { t: tLocal + 1000, lat: 22.6005, lng: 114.10, road: '新设备路', spd: 5, mode: 'walk', no: sn14.sessionNo },
+  ] });
+  // 「另一台设备」的存档码：另一天的数据，时间戳早于本机这段（晚于本机 resetAt 才会被保留）
+  const oldDate14 = new Date(Date.now() - 3 * 86400000).toISOString().slice(0, 10);
+  const tPeer = Date.now() + 1000;
+  const payload14 = {
+    v: 1, at: tPeer, resetAt: 0,
+    tracks: {
+      [oldDate14]: { date: oldDate14, startedAt: tPeer, endedAt: null, city: '广州',
+        path: [ { t: tPeer, lat: 23.10, lng: 113.30, road: '旧设备路', spd: 5, mode: 'walk' },
+                { t: tPeer + 1000, lat: 23.1005, lng: 113.30, road: '旧设备路', spd: 5, mode: 'walk' } ],
+        samples: [], rolls: [], sessions: [ { n: 1, lat: 23.10, lng: 113.30, t: tPeer } ], stats: null } },
+    achievements: { unlocked: {} },
+  };
+  const code14 = 'NW1.' + zlib.deflateRawSync(Buffer.from(JSON.stringify(payload14), 'utf8')).toString('base64url');
+  const imp14 = await post('/api/archive/import', { code: code14 });
+  ok('14.1 同步（导入存档码）成功', imp14.ok === true, JSON.stringify(imp14).slice(0, 90));
+  const rng14 = await J('/api/track/range?from=0000-01-01&to=' + today);
+  const flat14 = (rng14.days || []).flatMap((d) => d.path || []);
+  const local14 = flat14.filter((p) => Math.abs(Number(p.lat) - 22.60) < 0.01).length;
+  const peer14 = flat14.filter((p) => Math.abs(Number(p.lat) - 23.10) < 0.01).length;
+  ok('14.2 新设备先走的那段没有丢（合并保留）', local14 === 2, 'local=' + local14);
+  ok('14.3 邮箱里另一台设备的数据也并进来了', peer14 === 2 && (rng14.days || []).length === 2,
+    'peer=' + peer14 + ' days=' + (rng14.days || []).length);
+  const lp14 = await J('/api/lastpos');
+  ok('14.4 续走点按时间戳取最新（=本机先走的那段）', lp14.pos !== null && Math.abs(Number(lp14.lat) - 22.60) < 0.01,
+    JSON.stringify(lp14).slice(0, 90));
+  const ss14 = await J('/api/sessions');
+  const ns14 = (ss14.starts || []).map((x) => x.n).sort((a, b) => a - b);
+  ok('14.5 出发序号合并后全局重排（连续且无重复）', ns14.length >= 2 && ns14[0] === 1 && ns14.every((v, i) => v === i + 1), ns14.join(','));
+  const sn14b = await post('/api/session/start', { date: today, city: '深圳', scope: 'city', lat: 22.61, lng: 114.11 });
+  ok('14.6 下一次出发序号 = 合并后总数 + 1', sn14b.sessionNo === ns14.length + 1, 'sessionNo=' + sn14b.sessionNo + ' total=' + ns14.length);
+
+  console.log('\n== 15. 每小时自动存档配置 ==');
+  const cfg15 = await J('/api/config');
+  ok('15.1 hourlyMailArchive 默认开启', cfg15.hourlyMailArchive !== false, 'value=' + cfg15.hourlyMailArchive);
+  await post('/api/config', { hourlyMailArchive: false });
+  const cfg15b = await J('/api/config');
+  ok('15.2 可以关掉每小时自动存档', cfg15b.hourlyMailArchive === false, 'value=' + cfg15b.hourlyMailArchive);
+  await post('/api/config', { hourlyMailArchive: true });
+  const cfg15c = await J('/api/config');
+  ok('15.3 可以再打开', cfg15c.hourlyMailArchive === true, 'value=' + cfg15c.hourlyMailArchive);
+
   console.log(`\n===== 端到端结果：${pass} 通过 / ${fail} 失败 =====\n`);
   return fail ? 1 : 0;
 }

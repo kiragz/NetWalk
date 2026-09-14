@@ -21,7 +21,7 @@
   <header class="topbar" data-page-node-id="ddrJhtR5e5RhxcM4HEN3M4">
     <div class="brand" data-page-node-id="8DH2ofHV66qbHEOc2uAOXh">Net<span data-page-node-id="Gt7m3YCBqixEngqyYKio6f">Walk</span></div>
     <button class="ver-pill" id="btnAccount" title="账号与档案">👤 未登录</button>
-    <button class="ver-pill" id="btnVersion" title="查看版本更新概要">v0.9.21</button>
+    <button class="ver-pill" id="btnVersion" title="查看版本更新概要">v0.9.22</button>
     <div class="pill" id="pillMap" data-page-node-id="GjTS25Bi1mrlBafIXfCBl3">地图加载中</div>
     <div class="pill" id="pillNet" data-page-node-id="Snjd11zKSBJFXSszeLhDMN">网络采集中</div>
     <div class="pill" id="pillKey" data-page-node-id="h2AOMKNxwH67HjkAsxSCgU">击键采集中</div>
@@ -251,6 +251,12 @@
               结束漫游后自动把存档发到邮箱（想少收邮件就取消勾选，需要时手动「⬆ 上传存档」即可）
             </label>
           </div>
+          <div class="or-line" style="margin-top:6px;align-items:center">
+            <label class="hint" style="flex:1;margin:0;cursor:pointer">
+              <input type="checkbox" id="hourlyMailArchive" style="vertical-align:-2px;margin-right:4px"/>
+              漫游中<b>每小时</b>自动发一次存档（防止长时间漫游忘点「结束」丢数据；默认开启，可取消）
+            </label>
+          </div>
           <div class="or-line" style="margin-top:10px;align-items:center">
             <span class="hint" id="mailBoxStatus" style="flex:1;margin:0">邮箱存档状态：未检查</span>
             <button class="btn sm" id="btnMailStatus" title="检查邮箱里有没有 NetWalk 存档邮件">检查邮箱</button>
@@ -277,6 +283,22 @@
 </div>
 
 <!-- 结束浮层 -->
+<div class="modal-mask" id="maskSyncFirst" data-page-node-id="syncFirstMask">
+  <div class="modal" data-page-node-id="syncFirstModal">
+    <h2 id="syncFirstTitle" data-page-node-id="syncFirstTitle">这台电脑上还没有存档</h2>
+    <div class="desc" id="syncFirstDesc" data-page-node-id="syncFirstDesc">
+      检测到本机没有任何漫游轨迹，而你已经配置了邮箱存档。<br>
+      <b>建议先同步邮箱里的最新存档再出发</b>：这样会从上次结束的位置继续，轨迹和成就也是连续的。<br>
+      <span style="color:var(--txt-dim)">若直接出发：这次走的轨迹会另存一份，之后同步时两边会自动合并（不会丢数据），但续走点会变成这次的位置。</span>
+    </div>
+    <div class="modal-acts" data-page-node-id="syncFirstActs">
+      <button class="btn primary" id="btnSyncFirstGo" data-page-node-id="btnSyncFirstGo">📥 先同步存档再出发</button>
+      <button class="btn" id="btnSyncFirstSkip" data-page-node-id="btnSyncFirstSkip">直接出发</button>
+    </div>
+    <div class="hint" id="syncFirstHint" style="min-height:16px" data-page-node-id="syncFirstHint"></div>
+  </div>
+</div>
+
 <div class="modal-mask" id="maskDone" data-page-node-id="z9LHCTvEyYN6w37hfndEbz">
   <div class="modal" data-page-node-id="VlfJALACPM5h0llDJWMmCs">
     <h2 id="doneTitle" data-page-node-id="zXH7sBUFuBFuoNsb04vCS2">今天的漫游结束了</h2>

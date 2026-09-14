@@ -191,8 +191,8 @@
     setVisitLookup(fn) { this._visitLookup = typeof fn === 'function' ? fn : null; }
 
     /** 热力色索引：重叠 ≥2 次时返回热力色下标，否则 -1（用速度色） */
-    _heatIndex(key) {
-      const n = (key && this._visitLookup) ? Number(this._visitLookup(key)) || 0 : 0;
+    _heatIndex(key, lat, lng) {
+      const n = this._visitLookup ? Number(this._visitLookup(key, lat, lng)) || 0 : 0;
       if (n < 2) return -1;
       const base = this._speedColors.length - HEAT_COLORS.length;
       if (n >= 5) return base + 3;
@@ -204,18 +204,24 @@
     addTrackPoint(lat, lng, prev, spd, roadKey) {
       if (!this._ready) return;
       const cur = new this.AMap.LngLat(lng, lat);
-      const hi = this._heatIndex(roadKey);
+      const hi = this._heatIndex(roadKey, lat, lng);
       const li = hi >= 0 ? hi : this.speedColorIndex(spd);   // 重叠路段用热力色覆盖速度色
       if (prev) {
         // 每段按速度独立上色：段 = [上一点, 当前点]，交界处两点重叠补缝。
         // 线段写进「当前笔迹」——同一笔迹内的相邻点才相连。
-        const plo = this.speedColorIndex(this._lastSpd != null ? this._lastSpd : spd);
+        // 用「上一段实际画出的颜色档」判断是否提笔（不能用速度档：热力色参与时会算错）
+        const plo = this._lastIdx != null ? this._lastIdx : li;
         // ⚠ 速度档变化必须"提笔"（关闭全部当前笔迹再画边界段）：
         // 否则速度回到旧档时，线段会追加进旧档那条笔迹的末尾，
         // 把相距很远的两部分连进同一条线 —— 飞线的第二个来源（与换会话无关，纯速度波动就会触发）。
         if (plo !== li) this._curRun = {};
         const seg = [new this.AMap.LngLat(prev.lng, prev.lat), cur];
-        for (let k = Math.min(plo, li); k <= Math.max(plo, li); k++) {
+        // 速度色之间才做"跨档补缝"；涉及热力色时只画该段自己的颜色，
+        // 否则同一段线会被塞进多个颜色层，画面上看起来像"轨迹断成好几截"
+        const heatBase = this._speedColors.length - HEAT_COLORS.length;
+        const from = (plo < heatBase && li < heatBase) ? Math.min(plo, li) : li;
+        const to = (plo < heatBase && li < heatBase) ? Math.max(plo, li) : li;
+        for (let k = from; k <= to; k++) {
           let line = this._curRun[k];
           if (!line) {
             line = new this.AMap.Polyline({
@@ -234,6 +240,7 @@
         }
       }
       this._lastSpd = spd;
+      this._lastIdx = li;
       this._trackPts.push(cur);
       if (this._trackPts.length > 5000) this._trackPts = this._trackPts.slice(-4000);
     }
@@ -247,6 +254,7 @@
         this._runs = [];
         this._trackPts = [];
         this._lastSpd = null;
+        this._lastIdx = null;
       } else {
         // 追加新的一段：先"断笔"——关闭当前所有笔迹，
         // 下一段从新 Polyline 开始，绝不从上一段的末点连一条直线过来（飞线根源）

@@ -110,6 +110,7 @@ const DEFAULT_CONFIG = {
   // 结束漫游后是否自动把存档发到邮箱（关掉后仍可手动「⬆ 上传存档 / 📧 发送到邮箱」）。
   // 邮箱里 NetWalk 邮件太多想清爽一点的用户可以关掉，只在自己想备份时手动发。
   autoMailArchive: true,
+  hourlyMailArchive: true,   // 漫游中每小时自动发一次存档（默认开，可在设置里关）
   // 速度换算参数
   speed: {
     netWeight: 0.6,           // 网速权重
@@ -166,6 +167,12 @@ function saveConfig(cfg) {
 }
 
 let config = loadConfig();
+
+// 每小时自动存档：漫游进行中每小时把存档码发一次邮箱（防止长时间漫游忘点「结束」）
+let walkingNow = false;        // /api/session/start 置 true，/api/session/end 置 false
+let lastHourlyMailAt = 0;      // 上次发送时间（出发时重置计时起点）
+const HOURLY_MAIL_MS = Number(process.env.NETWALK_HOURLY_MS) > 0 ? Number(process.env.NETWALK_HOURLY_MS) : 60 * 60 * 1000;
+const HOURLY_CHECK_MS = Math.min(60000, Math.max(2000, Math.floor(HOURLY_MAIL_MS / 4)));
 
 const app = express();
 app.use(express.json({ limit: '48mb' }));
@@ -298,6 +305,7 @@ app.post('/api/config', (req, res) => {
     config.amapMaxCallsPerDay = Math.max(100, Math.min(100000, Math.round(Number(body.amapMaxCallsPerDay))));
   }
   if (typeof body.autoMailArchive === 'boolean') config.autoMailArchive = body.autoMailArchive;
+  if (typeof body.hourlyMailArchive === 'boolean') config.hourlyMailArchive = body.hourlyMailArchive;
   if (body.speed && typeof body.speed === 'object') {
     config.speed = { ...config.speed, ...body.speed };
   }
@@ -662,6 +670,8 @@ app.post('/api/session/start', (req, res) => {
   if (Number.isFinite(body.lat) && Number.isFinite(body.lng)) {
     try { n = store.addSessionStart(date, body.lat, body.lng); } catch (_) { /* 记录失败不影响出发 */ }
   }
+  walkingNow = true;
+  lastHourlyMailAt = Date.now();   // 每小时自动存档从出发时刻起算
   res.json({ ok: true, sessionNo: n });
 });
 
@@ -671,6 +681,7 @@ app.get('/api/sessions', (req, res) => {
 });
 
 app.post('/api/session/end', async (req, res) => {
+  walkingNow = false;
   const body = req.body || {};
   const date = body.date || todayStr();
   if (body.city || body.scope) store.setContext(date, { city: body.city, scope: body.scope });
@@ -707,6 +718,30 @@ app.post('/api/session/end', async (req, res) => {
     mailQueued: mailConfigured(config) && Boolean(archiveRecipient()) && config.autoMailArchive !== false,
   });
 });
+
+/**
+ * 漫游中每小时自动把存档码发到邮箱。
+ * 默认开启（config.hourlyMailArchive !== false），可在「设置 → 邮箱配置」里关掉。
+ * 只在漫游进行中发送，且距上次发送满一小时才发，避免空邮件刷屏。
+ */
+function tryHourlyArchiveMail() {
+  try {
+    if (config.hourlyMailArchive === false) return;
+    if (!walkingNow) return;
+    if (!mailConfigured(config)) return;
+    const to = archiveRecipient();
+    if (!to) return;
+    if (Date.now() - lastHourlyMailAt < HOURLY_MAIL_MS) return;
+    lastHourlyMailAt = Date.now();
+    const { code } = exportArchive(store, achStore, config);
+    const stamp = new Date().toTimeString().slice(0, 5);
+    sendArchiveMail(config, to, code, logLine, machineConfigText(config) + "\n(本封为「每小时自动存档」 " + stamp + ")")
+      .then((r) => logLine(r && r.ok
+        ? "⏰ 每小时自动存档：已发送到邮箱 " + to
+        : "⏰ 每小时自动存档发送失败：" + ((r && r.error) || "未知原因")));
+  } catch (e) { logLine("每小时自动存档异常：" + (e && e.message ? e.message : e)); }
+}
+try { const t = setInterval(tryHourlyArchiveMail, HOURLY_CHECK_MS); if (t.unref) t.unref(); } catch (_) { /* noop */ }
 
 // ---------- 成就 ----------
 app.get('/api/achievements', (req, res) => {
@@ -833,7 +868,10 @@ app.get('/api/track/range', (req, res) => {
     if (!data || (!(data.path || []).length && !(data.sessions || []).length)) continue;
     days.push({ date: d, count: (data.path || []).length, path: data.path || [], sessions: data.sessions || [] });
   }
-  res.json({ ok: true, from, to, days, starts: store.allSessionStarts().filter((x) => x.date >= from && x.date <= to), total: days.reduce((n, x) => n + x.count, 0) });
+  // resetAt：重置时刻。客户端用它把「重置前」的点排除在重叠统计之外（用户要求按重置后的数据判定）
+  let resetAt = 0;
+  try { resetAt = Number(store.getResetAt && store.getResetAt()) || 0; } catch (_) { resetAt = 0; }
+  res.json({ ok: true, from, to, days, resetAt, starts: store.allSessionStarts().filter((x) => x.date >= from && x.date <= to), total: days.reduce((n, x) => n + x.count, 0) });
 });
 
 // 从邮箱拉回最新存档码（出发前调用；配置了 IMAP 才可用）

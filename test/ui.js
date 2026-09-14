@@ -102,6 +102,8 @@ const FAKE_AGG = {
 function json(o, status = 200) {
   return Promise.resolve({ ok: status < 400, status, json: () => Promise.resolve(o) });
 }
+let MAILBOX_STATUS = { imapConfigured: false, hasArchive: false, count: 0 };   // 可变的邮箱状态桩
+let TRACK_RANGE_DAYS = [];                                                     // 可变的轨迹范围桩（空=新设备）
 let MAIL_STUB = { ok: true, to: '172805132@qq.com', error: '' };   // 模拟服务端「结束自动发信」的结果
 const calls = [];
 const postBodies = [];   // 记录 /api/config 的 POST 载荷，用于校验出发点配置
@@ -117,6 +119,8 @@ win.fetch = function (url, opt) {
   if (u.indexOf('/api/day/') === 0) {
     return json({ date: TODAY, path: FAKE_TRACK, stats: { distance: 4845, duration: 1400000, avgSpeed: 5.2, maxSpeed: 12.3, rolls: 8 }, rolls: new Array(8).fill({}), visitedRoads: ['科技路0', '科技路1', '科技路2'] });
   }
+  if (u.indexOf('/api/mailbox/status') === 0) return json(Object.assign({ ok: true }, MAILBOX_STATUS));
+  if (u.indexOf('/api/track/range') === 0) return json({ ok: true, days: TRACK_RANGE_DAYS, starts: [] });
   if (u.indexOf('/api/lastpos') === 0) {
     const lastPt = FAKE_TRACK[FAKE_TRACK.length - 1];
     return json({ ok: true, date: TODAY, lat: lastPt.lat, lng: lastPt.lng, road: lastPt.road || '' });
@@ -248,8 +252,38 @@ const shown = (id) => $(id).classList.contains('show');
   const jv = RU.buildRoadVisits(jitterDay);
   const hotCells = Object.keys(jv).filter((k) => k.indexOf('R:') !== 0 && jv[k] >= 2).length;
   ok('坐标有偏差的同一条街也判为重叠（30m 网格）', hotCells >= 1, 'hotCells=' + hotCells + ' total=' + Object.keys(jv).length);
-  ok('网格键 ~30m（0.0003 度）', RU.cellKey({ lat: 22.5, lng: 114.0 }) === RU.cellKey({ lat: 22.50005, lng: 114.00005 }), '同格');
-  ok('相差 100m 不判同格', RU.cellKey({ lat: 22.5, lng: 114.0 }) !== RU.cellKey({ lat: 22.5011, lng: 114.0 }), '异格');
+  // 新口径（v0.9.22）：有路名按路名（整条街一个颜色，中途不变色）
+  const sameRoad = [
+    { date: '2026-09-14', path: [
+      { lat: 22.5, lng: 114.0, road: '解放北路' }, { lat: 22.5, lng: 114.002, road: '解放北路' },
+      { lat: 22.5, lng: 114.004, road: '解放北路' }, { lat: 22.5, lng: 114.006, road: '解放北路' },
+    ] },
+  ];
+  const vSame = RU.buildRoadVisits(sameRoad, 0);
+  ok('同一条街连续多段只算 1 遍（整条街一个颜色）', vSame['R:解放北路'] === 1, JSON.stringify(vSame).slice(0, 120));
+  ok('有路名时不再按网格重复计数', Object.keys(vSame).length === 1, Object.keys(vSame).join(','));
+  ok('heatKey: 有路名用路名键', RU.heatKey({ lat: 22.5, lng: 114.0, road: '解放北路' }) === 'R:解放北路');
+  ok('heatKey: 无路名回落到网格键', RU.heatKey({ lat: 22.5, lng: 114.0, road: '' }).indexOf('R:') !== 0);
+  // 抗抖动：同一格在很近的间距内被反复进出，只算一遍
+  const jit = [{ date: '2026-09-14', path: [
+    { lat: 22.5, lng: 114.0, road: '' }, { lat: 22.5, lng: 114.0002, road: '' },
+    { lat: 22.5, lng: 114.0, road: '' }, { lat: 22.5, lng: 114.0002, road: '' },
+  ] }];
+  const vJit = RU.buildRoadVisits(jit, 0);
+  ok('抗抖动：近距离反复进出同一格只算 1 遍', Math.max.apply(null, Object.values(vJit)) === 1, JSON.stringify(vJit));
+  // 忽略重置前的数据
+  const T0 = 1700000000000;
+  const preReset = [{ date: '2026-09-14', path: [
+    { t: T0 - 10000, lat: 22.5, lng: 114.0, road: '旧街' }, { t: T0 - 9000, lat: 22.5, lng: 114.001, road: '旧街' },
+    { t: T0 + 1000, lat: 22.5, lng: 114.002, road: '新街' }, { t: T0 + 2000, lat: 22.5, lng: 114.003, road: '新街' },
+  ] }];
+  const vReset = RU.buildRoadVisits(preReset, T0);
+  ok('重置前的点不参与重叠统计', vReset['R:旧街'] === undefined && vReset['R:新街'] === 1, JSON.stringify(vReset));
+  ok('不传 resetAt 时旧点照常统计', RU.buildRoadVisits(preReset, 0)['R:旧街'] === 1);
+  // 跨天同一条街 = 2 遍（该亮热力色）
+  const twoDays = [{ date: '2026-09-13', path: [{ lat: 22.5, lng: 114.0, road: '中山五路' }] },
+    { date: '2026-09-14', path: [{ lat: 22.5, lng: 114.0, road: '中山五路' }] }];
+  ok('跨天走同一条街 → 2 遍（亮青）', RU.buildRoadVisits(twoDays, 0)['R:中山五路'] === 2);
   const Dp = win.DrillProvider;
   if (Dp) {
     const dp = new Dp({});
@@ -848,6 +882,45 @@ const shown = (id) => $(id).classList.contains('show');
     gravityRec && gravityRec.choice);
   ok('远方引力：按远行 1200m 规划', !!gravityRec && gravityRec.roll === 100, gravityRec && gravityRec.roll);
   eG.stop();
+
+  // 新设备出发前提示「先同步存档」（0.9.22）
+  console.log('\n== Q. 新设备出发前提示先同步 ==');
+  ok('同步提示浮层元素齐全', !!$('maskSyncFirst') && !!$('btnSyncFirstGo') && !!$('btnSyncFirstSkip'));
+  // 模拟新设备：本机无轨迹 + 已配置 IMAP
+  MAILBOX_STATUS = { imapConfigured: true, hasArchive: true, count: 3 };
+  TRACK_RANGE_DAYS = [];
+  win.NetWalkDebug.resetSyncPrompt();
+  $('btnStart').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(400);
+  ok('新设备点出发 → 弹出「先同步存档」提示', shown('maskSyncFirst'));
+  ok('提示时不会直接开始走（btnStart 仍可用）', $('btnStart').disabled === false);
+  // 选「直接出发」→ 正常开始漫游
+  $('btnSyncFirstSkip').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(700);
+  ok('选直接出发后开始漫游', $('btnStart').disabled === true);
+  ok('提示浮层已关闭', !shown('maskSyncFirst'));
+  ok('日志说明会合并、不改续走点', $('logList').textContent.indexOf('两边会自动合并') >= 0);
+  // 收尾：结束这次漫游，避免影响后续判定
+  $('btnEnd').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(500);
+  // 「先同步再出发」路径：点按钮应调用 /api/mailbox/pull
+  win.NetWalkDebug.resetSyncPrompt();
+  $('btnStart').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(400);
+  $('btnSyncFirstGo').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(900);
+  ok('点「先同步存档再出发」调用 /api/mailbox/pull', calls.some((c) => c.indexOf('/api/mailbox/pull') >= 0));
+  ok('同步后自动开始漫游', $('btnStart').disabled === true);
+  // 有本机数据时不再提示（老用户不受打扰）
+  $('btnEnd').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(500);
+  TRACK_RANGE_DAYS = [{ date: TODAY, path: FAKE_TRACK }];
+  win.NetWalkDebug.resetSyncPrompt();
+  $('btnStart').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(500);
+  ok('本机已有轨迹时不再弹同步提示', !shown('maskSyncFirst') && $('btnStart').disabled === true);
+  $('btnEnd').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(400);
 
   console.log('\n===== UI 测试结果：' + pass + ' 通过 / ' + fail + ' 失败 =====');
   if (errors.length) { console.log('\n捕获到的错误：'); errors.slice(0, 10).forEach((e) => console.log('  - ' + e)); }
