@@ -57,7 +57,7 @@
     rowAmap: $('rowAmap'), mAmap: $('mAmap'),
     doneStats: $('doneStats'), btnOpenReport: $('btnOpenReport'), btnRestart: $('btnRestart'),
     doneArc: $('doneArc'), btnDoneArcCopy: $('btnDoneArcCopy'),
-    btnDoneMail: $('btnDoneMail'), doneHint: $('doneHint'),
+    btnDoneMail: $('btnDoneMail'), doneHint: $('doneHint'), doneDesc: $('doneDesc'),
     btnOvClose: $('btnOvClose'),
     // 功能栏
     btnAch: $('btnAch'), btnStats: $('btnStats'), btnArchive: $('btnArchive'),
@@ -114,8 +114,12 @@
     started: false,
     autoPausedByNet: false,   // 断网自动暂停标记（恢复联网后自动继续）
     roadVisits: {},           // 路段 → 走过次数（重叠热力着色）
-    sessionRuns: {},          // 本次行走中各路段已走完的遍数
+    sessionRuns: {},          // 本次行走中各路段已走完的遍数（兼容旧字段）
+    sessionCells: {},         // 本次行走中各热力网格已走完的遍数
+    sessionRoads: {},         // 本次行走中同名道路已走完的遍数
+    lastCellKey: '',          // 当前所在热力网格
     lastRoadKey: '',          // 当前所在路段（用于统计本次行走的遍数）
+    lastMail: null,           // 上次「结束漫游」的自动发信结果 { ok, to, error }
     netAvailable: false,
     keyMode: 'none',
     channel: ('BroadcastChannel' in window) ? new BroadcastChannel('netwalk') : null,
@@ -166,6 +170,16 @@
     const d = new Date();
     return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
   }
+  /** 邮箱脱敏显示：172805132@qq.com → 172***32@qq.com */
+  function maskMail(s) {
+    const v = String(s || '');
+    const at = v.indexOf('@');
+    if (at <= 2) return v;
+    const name = v.slice(0, at), domain = v.slice(at);
+    if (name.length <= 5) return name.slice(0, 1) + '***' + domain;
+    return name.slice(0, 3) + '***' + name.slice(-2) + domain;
+  }
+
   function log(msg) {
     const d = new Date();
     const t = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
@@ -564,7 +578,7 @@
     bindUi();
     initNetWatch();
     // 供测试/外部调用的纯函数（区域修复的分段与判定逻辑）
-    window.NetWalkRepairUtil = { splitByDistance, insideBounds, countInBounds, segKey, buildRoadVisits, overlapCount, nextPieceIndex };
+    window.NetWalkRepairUtil = { splitByDistance, insideBounds, countInBounds, segKey: cellKey, cellKey, buildRoadVisits, overlapCount, nextPieceIndex, visitsAt };
     bindProfileUi();
     setupLocalKeyFallback();
     checkProfile();
@@ -844,7 +858,10 @@
     const origin = resume || state.origin;
     // 实时重叠着色：历史遍数 + 本次行走已走完的遍数 + 当前这一遍
     state.sessionRuns = {};
+    state.sessionCells = {};
+    state.sessionRoads = {};
     state.lastRoadKey = '';
+    state.lastCellKey = '';
     if (state.provider.setVisitLookup) state.provider.setVisitLookup(visitCountLive);
     const engine = new window.RoamEngine({
       provider: state.provider,
@@ -957,42 +974,57 @@
   }
 
   // ---------- 重叠热力：同一条路走过几次 ----------
-  /** 路段标识：有路名用路名；没路名用 ~11m 网格坐标做近似键 */
-  function segKey(p) {
-    const road = String((p && p.road) || '').trim();
-    if (road) return road;
+  // 判定口径（两者取较大值，避免漏判）：
+  //   ① 几何网格：~30 米一格，跨天再走同一条街就会落在同一格里（最可靠，不依赖路名）
+  //   ② 路名：同名道路再走一遍也算一次（用于路名清晰、但两次走法略有偏差的情况）
+  const HEAT_CELL = 0.0003;   // ≈33m(纬) / ≈30m(经，广州纬度)
+
+  function cellKey(p) {
     if (!Number.isFinite(p && p.lat) || !Number.isFinite(p && p.lng)) return '';
-    return '#' + p.lat.toFixed(4) + ',' + p.lng.toFixed(4);
+    return Math.round(p.lat / HEAT_CELL) + ',' + Math.round(p.lng / HEAT_CELL);
   }
 
-  /** 统计每个路段走过的次数：同一天内连续同名路段算 1 遍，跨天/跨会话累加 */
+  /** 统计每个网格 / 每条路走过的次数：跨天累加，同一天内连续同一格只算一遍 */
   function buildRoadVisits(days) {
     const visits = {};
-    for (const day of days) {
+    for (const day of (days || [])) {
       const path = (day && day.path) || [];
-      let prevKey = null;
+      let prevCell = null, prevRoad = null;
       for (const p of path) {
-        const key = segKey(p);
-        if (!key) { prevKey = null; continue; }
-        if (key !== prevKey) visits[key] = (visits[key] || 0) + 1;   // 新的一次经过
-        prevKey = key;
+        const c = cellKey(p);
+        if (c && c !== prevCell) visits[c] = (visits[c] || 0) + 1;
+        prevCell = c;
+        const r = String(p.road || '').trim();
+        if (r) {
+          if (r !== prevRoad) visits['R:' + r] = (visits['R:' + r] || 0) + 1;
+          prevRoad = r;
+        } else prevRoad = null;
       }
     }
     return visits;
   }
 
-  /** 历史绘制用：该路段在存档里走过几次 */
-  function visitCountHistory(key) { return (state.roadVisits && state.roadVisits[key]) || 0; }
-
-  /** 实时绘制用：历史遍数 + 本次行走已走完的遍数 + 当前这一遍 */
-  function visitCountLive(key) {
-    if (!key) return 0;
-    const h = (state.roadVisits && state.roadVisits[key]) || 0;
-    const s2 = (state.sessionRuns && state.sessionRuns[key]) || 0;
-    return h + s2 + 1;
+  /** 某点的重叠次数：includeCurrent=true 时把"当前这一遍"也算上（实时绘制用） */
+  function visitsAt(key, lat, lng, includeCurrent) {
+    const c = (Number.isFinite(lat) && Number.isFinite(lng)) ? cellKey({ lat, lng }) : '';
+    const histC = c ? (state.roadVisits[c] || 0) : 0;
+    const histR = key ? (state.roadVisits['R:' + key] || 0) : 0;
+    let n = Math.max(histC, histR);
+    if (includeCurrent) {
+      const sesC = c ? (state.sessionCells[c] || 0) : 0;
+      const sesR = key ? (state.sessionRoads[key] || 0) : 0;
+      n = Math.max(histC + sesC, histR + sesR) + 1;
+    }
+    return n;
   }
 
-  /** 重叠路段的条数（用于日志提示） */
+  /** 历史绘制用：该点已经走过几次 */
+  function visitCountHistory(key, lat, lng) { return visitsAt(key, lat, lng, false); }
+
+  /** 实时绘制用：历史 + 本次已完成遍数 + 当前这一遍 */
+  function visitCountLive(key, lat, lng) { return visitsAt(key, lat, lng, true); }
+
+  /** 重叠点数（用于日志提示） */
   function overlapCount(visits) {
     let n = 0;
     for (const k in visits) if (visits[k] >= 2) n++;
@@ -1326,10 +1358,18 @@
   }
 
   function onEngineUpdate(s) {
-    // 记录本次行走走过的路段遍数（用于重叠热力着色：再走一遍就变热色）
+    // 记录本次行走经过的网格/道路（重叠热力着色：同一处再走一遍就变热色）
+    if (Number.isFinite(s.lat) && Number.isFinite(s.lng)) {
+      const ck = cellKey(s);
+      if (ck && ck !== state.lastCellKey) {
+        if (state.lastCellKey) state.sessionCells[state.lastCellKey] = (state.sessionCells[state.lastCellKey] || 0) + 1;
+        state.lastCellKey = ck;
+      }
+    }
     if (s.road && s.road !== state.lastRoadKey) {
       if (state.lastRoadKey) {
         state.sessionRuns[state.lastRoadKey] = (state.sessionRuns[state.lastRoadKey] || 0) + 1;
+        state.sessionRoads[state.lastRoadKey] = (state.sessionRoads[state.lastRoadKey] || 0) + 1;
       }
       state.lastRoadKey = s.road;
     }
@@ -1393,6 +1433,11 @@
           announceAchievements(endRes.achievements.newly);
         }
       }
+      state.lastMail = (endRes && endRes.mail) || null;
+      if (state.lastMail) {
+        if (state.lastMail.ok) log(`📬 结束漫游：存档码已自动发送到 ${state.lastMail.to}（含本机配置）`);
+        else log(`⚠ 结束漫游：存档邮件未自动发出 —— ${state.lastMail.error || '未知原因'}`);
+      }
     } catch (err) {
       log('结束上报失败：' + (err && err.message ? err.message : err));
     }
@@ -1433,7 +1478,18 @@
     el.doneStats.innerHTML = items.map((i) =>
       `<div class="done-stat"><div class="k">${i.k}</div><div class="v">${i.v}<small>${i.u}</small></div></div>`).join('');
     el.maskDone.classList.add('show');
-    if (el.doneHint) el.doneHint.textContent = '';
+    // 结束漫游是自动发存档邮件的（无需再点按钮）——把真实结果直接说清楚
+    const mailInfo = state.lastMail;
+    if (el.doneDesc) {
+      el.doneDesc.textContent = (mailInfo && mailInfo.ok)
+        ? `数据已保存到本机，日报已生成；存档码已自动发送到 ${maskMail(mailInfo.to)}。`
+        : '数据已保存到本机，日报已生成。';
+    }
+    if (el.doneHint) {
+      if (mailInfo && mailInfo.ok) el.doneHint.textContent = `📬 已自动发送到 ${maskMail(mailInfo.to)}（含存档码与本机配置，换设备登录该邮箱即可续档）`;
+      else if (mailInfo && mailInfo.error) el.doneHint.textContent = `⚠ 存档邮件没有自动发出：${mailInfo.error} —— 可点下方「重新发送到邮箱」重试`;
+      else el.doneHint.textContent = '';
+    }
 
     // 存档码：结束后直接给出，方便复制到其他设备继承数据
     state.lastArchiveCode = '';

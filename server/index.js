@@ -670,7 +670,7 @@ app.get('/api/sessions', (req, res) => {
   res.json({ ok: true, starts: store.allSessionStarts() });
 });
 
-app.post('/api/session/end', (req, res) => {
+app.post('/api/session/end', async (req, res) => {
   const body = req.body || {};
   const date = body.date || todayStr();
   if (body.city || body.scope) store.setContext(date, { city: body.city, scope: body.scope });
@@ -678,19 +678,32 @@ app.post('/api/session/end', (req, res) => {
   // 结束后立即结算成就
   const agg = store.aggregate();
   const st = achStore.refresh(agg);
-  // 结束也把最新存档码发到邮箱（配置了邮件服务才有）：换设备打开邮箱复制即可接着走
+  // 结束自动把最新存档码发到邮箱（含本机配置），前端据返回结果显示"已自动发送/失败原因"
   // 收件人一律用 config.mailUser（账号里存的是脱敏邮箱，不能当收件人）
-  // autoMailArchive=false 时跳过自动发送（用户想控制邮箱里的邮件量），仍可手动「⬆ 上传存档」
+  let mail = null;
   try {
     const to = archiveRecipient();
-    if (mailConfigured(config) && to && config.autoMailArchive !== false) {
+    if (!mailConfigured(config)) {
+      mail = { ok: false, to: '', error: '未配置邮箱（设置 → 邮箱配置：SMTP 主机 / 账号 / 授权码）' };
+    } else if (!to) {
+      mail = { ok: false, to: '', error: '邮箱账号为空（设置 → 邮箱配置）' };
+    } else if (config.autoMailArchive === false) {
+      mail = { ok: false, to, error: '已在设置里关闭「结束自动发存档」' };
+    } else {
       const { code } = exportArchive(store, achStore, config);
-      sendArchiveMail(config, to, code, logLine, machineConfigText(config))
-        .then((r) => { if (r && !r.ok) logLine('结束漫游后存档邮件未发出：' + (r.error || '')); });
+      const r = await Promise.race([
+        sendArchiveMail(config, to, code, logLine, machineConfigText(config)),
+        new Promise((done) => setTimeout(() => done({ ok: false, error: '发送超时（检查授权码/网络后点「重新发送」）' }), 15000)),
+      ]);
+      mail = { ok: !!(r && r.ok), to, error: (r && r.error) || '' };
     }
-  } catch (e) { logLine('结束漫游发信异常：' + (e && e.message ? e.message : e)); }
+  } catch (e) {
+    mail = { ok: false, to: '', error: '发信异常：' + (e && e.message ? e.message : e) };
+    logLine('结束漫游发信异常：' + (e && e.message ? e.message : e));
+  }
   res.json({
     ok: true, date, stats: data.stats, achievements: st,
+    mail,
     mailQueued: mailConfigured(config) && Boolean(archiveRecipient()) && config.autoMailArchive !== false,
   });
 });

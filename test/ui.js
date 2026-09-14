@@ -102,6 +102,7 @@ const FAKE_AGG = {
 function json(o, status = 200) {
   return Promise.resolve({ ok: status < 400, status, json: () => Promise.resolve(o) });
 }
+let MAIL_STUB = { ok: true, to: '172805132@qq.com', error: '' };   // 模拟服务端「结束自动发信」的结果
 const calls = [];
 const postBodies = [];   // 记录 /api/config 的 POST 载荷，用于校验出发点配置
 win.fetch = function (url, opt) {
@@ -126,6 +127,7 @@ win.fetch = function (url, opt) {
   if (u.indexOf('/api/stats') === 0) return json({ ok: true, range: 'day', from: TODAY, to: TODAY, agg: FAKE_AGG });
   if (u.indexOf('/api/archive/export') === 0) return json({ ok: true, code: 'NW1.' + 'A'.repeat(300), days: 3, bytes: 7080, rawBytes: 44764 });
   if (u.indexOf('/api/archive/import') === 0) return json({ ok: true, added: 1, merged: 2, days: 4, achievements: { newly: [], unlocked: {}, total: 36, got: 4 } });
+  if (u.indexOf('/api/session/end') === 0) return json({ ok: true, date: TODAY, achievements: { newly: ['dist_5k'], unlocked: {}, total: 36, got: 5 }, mail: MAIL_STUB });
   if (u.indexOf('/api/session/') === 0) return json({ ok: true, date: TODAY, achievements: { newly: ['dist_5k'], unlocked: {}, total: 36, got: 5 } });
   if (u.indexOf('/api/report/') === 0) return json({ ok: true, url: '/reports/netwalk-' + TODAY + '.html' });
   if (u.indexOf('/api/mapkey') === 0) return json({ ok: true, key: '' });
@@ -235,10 +237,19 @@ const shown = (id) => $(id).classList.contains('show');
     ] },
   ];
   const visits = RU.buildRoadVisits(days2);
-  ok('同一路段跨天累加次数（解放北路=2）', visits['解放北路'] === 2, JSON.stringify(visits));
-  ok('同一天内连续同名只算 1 遍（中山五路=2）', visits['中山五路'] === 2, String(visits['中山五路']));
-  ok('重叠路段计数（overlapCount>=2）', RU.overlapCount(visits) === 2, String(RU.overlapCount(visits)));
-  ok('无路名时用网格键兜底', RU.segKey({ lat: 22.5, lng: 114.0, road: '' }).indexOf('#') === 0);
+  ok('同一路段跨天累加次数（解放北路=2）', visits['R:解放北路'] === 2, JSON.stringify(visits).slice(0, 160));
+  ok('同一天内连续同名只算 1 遍（中山五路=2）', visits['R:中山五路'] === 2, String(visits['R:中山五路']));
+  ok('重叠路段计数（overlapCount>=2）', RU.overlapCount(visits) >= 2, String(RU.overlapCount(visits)));
+  // 关键回归：两次走同一条街但坐标略有偏差（不同天路线点不完全重合）→ 仍应判为重叠
+  const jitterDay = [
+    { date: '2026-09-12', path: [{ lat: 22.5, lng: 114.0, road: '' }, { lat: 22.5, lng: 114.0004, road: '' }] },
+    { date: '2026-09-13', path: [{ lat: 22.50009, lng: 114.00002, road: '' }, { lat: 22.50011, lng: 114.00042, road: '' }] },
+  ];
+  const jv = RU.buildRoadVisits(jitterDay);
+  const hotCells = Object.keys(jv).filter((k) => k.indexOf('R:') !== 0 && jv[k] >= 2).length;
+  ok('坐标有偏差的同一条街也判为重叠（30m 网格）', hotCells >= 1, 'hotCells=' + hotCells + ' total=' + Object.keys(jv).length);
+  ok('网格键 ~30m（0.0003 度）', RU.cellKey({ lat: 22.5, lng: 114.0 }) === RU.cellKey({ lat: 22.50005, lng: 114.00005 }), '同格');
+  ok('相差 100m 不判同格', RU.cellKey({ lat: 22.5, lng: 114.0 }) !== RU.cellKey({ lat: 22.5011, lng: 114.0 }), '异格');
   const Dp = win.DrillProvider;
   if (Dp) {
     const dp = new Dp({});
@@ -457,6 +468,19 @@ const shown = (id) => $(id).classList.contains('show');
   await sleep(200);
   ok('点「发送到邮箱」调用 /api/mailbox/push', calls.some((c) => c.indexOf('/api/mailbox/push') >= 0));
   ok('发送后有结果提示', (($('doneHint') || {}).textContent || '').length > 0, ($('doneHint') || {}).textContent);
+
+  // 结束漫游自动发信：界面必须明确反馈（用户不必再点按钮）
+  ok('结束提示写明已自动发送（邮箱脱敏）', ($('doneDesc').textContent || '').indexOf('172***32@qq.com') >= 0, $('doneDesc').textContent);
+  ok('日志记录「存档码已自动发送到」', $('logList').textContent.indexOf('存档码已自动发送到') >= 0);
+  ok('手动按钮改名为「重新发送到邮箱」', $('btnDoneMail').textContent.indexOf('重新发送') >= 0, $('btnDoneMail').textContent);
+  // 自动发信失败分支：要给出原因 + 重发入口
+  MAIL_STUB = { ok: false, to: '', error: '未配置邮箱（设置 → 邮箱配置）' };
+  $('btnRestart').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(400);
+  $('btnEnd').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(500);
+  ok('发信失败时提示原因', ($('doneHint').textContent || '').indexOf('未配置邮箱') >= 0, $('doneHint').textContent);
+  ok('失败时日志给出告警', $('logList').textContent.indexOf('存档邮件未自动发出') >= 0);
 
   // 结束面板：打开今日日报（修复：不再"点了没反应"）
   let openedUrl = null;
