@@ -133,8 +133,7 @@
       // 这就是"直线飞线"的真正来源（数据再干净也拦不住，因为它发生在绘制层）。
       // 现改为"笔迹"模型：连续的同色相邻点共用一条 Polyline（一条 run），
       // 遇到断笔（换会话/跳变/断档/直线剔除）就换新 Polyline，段与段之间绝不相连。
-      this._speedColors = speedGradientPalette().concat(HEAT_COLORS);
-      this._visitLookup = null;   // 路段重叠次数查询（由 app 注入）：返回该路段走过的总次数
+      this._speedColors = speedGradientPalette();
       this._runs = [];       // 所有已创建的笔迹（清空轨迹时统一移除）
       this._curRun = {};     // 速度档 → 当前笔迹
       this._trackPts = [];
@@ -187,31 +186,14 @@
       return Math.floor(t * 10);
     }
 
-    /** 设置「路段重叠次数」查询函数（返回该路段已走过的次数），用于重叠热力着色 */
-    setVisitLookup(fn) { this._visitLookup = typeof fn === 'function' ? fn : null; }
-
-    /** 热力色索引：重叠 ≥2 次时返回热力色下标，否则 -1（用速度色） */
-    _heatIndex(key, lat, lng) {
-      const n = this._visitLookup ? Number(this._visitLookup(key, lat, lng)) || 0 : 0;
-      if (n < 2) return -1;
-      const base = this._speedColors.length - HEAT_COLORS.length;
-      if (n >= 5) return base + 3;
-      if (n === 4) return base + 2;
-      if (n === 3) return base + 1;
-      return base;   // 2 次
-    }
-
-    addTrackPoint(lat, lng, prev, spd, roadKey) {
+    addTrackPoint(lat, lng, prev, spd) {
       if (!this._ready) return;
       const cur = new this.AMap.LngLat(lng, lat);
-      const hi = this._heatIndex(roadKey, lat, lng);
-      const li = hi >= 0 ? hi : this.speedColorIndex(spd);   // 重叠路段用热力色覆盖速度色
+      const li = this.speedColorIndex(spd);
       if (prev) {
         // 关键不变式：一条笔迹（Polyline）里只允许「原始点序上相邻」的线段。
         // 判据：该笔迹的末点必须恰好等于本段起点（prev）；不等就另起一笔。
-        // 这样换颜色/换速度/换会话都自然提笔，而同一颜色的连续段可以继续追加 ——
-        // 折线对象最少、渲染最稳（之前每换一次色档就提笔，热力色让对象数爆炸，
-        // 地图每秒重绘 → 紫点/面板抽搐闪烁、折线多到渲染丢段 → 严重断线）。
+        // 同一颜色的连续段继续追加（折线对象最少、渲染最稳），绝不连飞线。
         const seg = [new this.AMap.LngLat(prev.lng, prev.lat), cur];
         let line = this._curRun[li];
         let lastPt = null;
@@ -232,7 +214,7 @@
           this.map.add(line);
           this._runs.push(line);
           this._curRun[li] = line;
-          // 笔迹太多会拖垮渲染（闪烁/断线的根源）：超过上限就把最老的段整段移除
+          // 笔迹太多会拖垮渲染：超过上限就把最老的段整段移除
           if (this._runs.length > 2400) {
             const dropped = this._runs.splice(0, 600);
             for (const old of dropped) { try { this.map.remove(old); } catch (_) { /* noop */ } }
@@ -241,10 +223,10 @@
         line.setPath(line.getPath().concat(seg));
       }
       this._lastSpd = spd;
-      this._lastIdx = li;
       this._trackPts.push(cur);
       if (this._trackPts.length > 5000) this._trackPts = this._trackPts.slice(-4000);
     }
+
     setTrack(points, { append = false } = {}) {
       if (!this._ready) return;
       if (!append) {
@@ -478,12 +460,6 @@
 
   global.AmapProvider = AmapProvider;
 })(window);
-
-/**
- * 重叠热力色（按走过次数）：2 次 → 青，3 次 → 绿，4 次 → 紫，5 次及以上 → 洋红。
- * 刻意避开速度色系（黄→橙→红），保证「重叠」和「速度快慢」一眼能区分。
- */
-const HEAT_COLORS = ['#3ad9ff', '#3ddc97', '#a97bff', '#ff5cc8'];
 
 /** 速度渐变 10 档调色板：浅黄 → 橙 → 深红（与弹窗/日报同一套插值） */
 function speedGradientPalette() {  const mix = (x, y, k) => Math.round(x + (y - x) * k);

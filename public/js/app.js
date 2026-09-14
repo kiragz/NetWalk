@@ -115,11 +115,6 @@
     ws: null,
     started: false,
     autoPausedByNet: false,   // 断网自动暂停标记（恢复联网后自动继续）
-    roadVisits: {},           // 路段 → 走过次数（重叠热力着色）
-    sessionRuns: {},          // 本次行走中各路段已走完的遍数（兼容旧字段）
-    sessionKeys: {},          // 本次行走中各路段键已走完的遍数
-    lastHeatKey: '',          // 当前所在路段键
-    lastRoadKey: '',          // 当前所在路段（用于统计本次行走的遍数）
     lastMail: null,           // 上次「结束漫游」的自动发信结果 { ok, to, error }
     syncPromptDone: false,    // 本次会话是否已问过「要不要先同步存档」
     netAvailable: false,
@@ -589,7 +584,7 @@
       loadAllDays,
       drawHistoryOnMap,
     };
-    window.NetWalkRepairUtil = { splitByDistance, insideBounds, countInBounds, segKey: cellKey, cellKey, heatKey, buildRoadVisits, overlapCount, nextPieceIndex, visitsAt, bboxOf, pathLen, routeSane };
+    window.NetWalkRepairUtil = { splitByDistance, insideBounds, countInBounds, nextPieceIndex, bboxOf, pathLen, routeSane };
     bindProfileUi();
     setupLocalKeyFallback();
     checkProfile();
@@ -894,12 +889,6 @@
     const resume = await findLastPosition();
 
     const origin = resume || state.origin;
-    // 实时重叠着色：历史遍数 + 本次行走已走完的遍数 + 当前这一遍
-    state.sessionRuns = {};
-    state.sessionKeys = {};
-    state.lastRoadKey = '';
-    state.lastHeatKey = '';
-    if (state.provider.setVisitLookup) state.provider.setVisitLookup(visitCountLive);
     const engine = new window.RoamEngine({
       provider: state.provider,
       cfg: state.cfg.speed,
@@ -991,18 +980,14 @@
       const r = await fetch('/api/track/range?from=0000-01-01&to=' + today()).then((x) => x.json());
       const days = (r && r.days) || [];
       const flat = days.flatMap((d) => d.path || []);
-      // 重叠统计要在绘制之前算好：同一条路走过 ≥2 次用热力色（青/绿/紫/洋红）
-      state.roadVisits = buildRoadVisits(days, Number(r && r.resetAt) || 0);
-      if (state.provider.setVisitLookup) state.provider.setVisitLookup(visitCountHistory);
+
       if (flat.length < 2) { log('地图上还没有历史轨迹，本次行走将开始画线'); }
       else {
         const segs = splitTrackSegments(flat, (r && r.starts) || []);
         segs.forEach((seg, idx) => {
           state.provider.setTrack(seg, { append: idx > 0 });
         });
-        const ov = overlapCount(state.roadVisits);
         log(`已把历史轨迹画上地图：${days.length} 天、${flat.length} 个点、${segs.length} 段连续轨迹（已剔除跨设备/跨会话飞线）`);
-        if (ov) log(`🔁 其中 ${ov} 个路段走过 2 次以上，已按重叠次数着色：2 次=青 3 次=绿 4 次=紫 5 次以上=洋红`);
       }
       for (const st of (r && r.starts) || []) {
         if (state.provider.addStartMarker) state.provider.addStartMarker(st.lat, st.lng, st.n);
@@ -1010,72 +995,6 @@
     } catch (_) { /* 离线时忽略，不影响行走 */ }
   }
 
-  // ---------- 重叠热力：同一条路走过几次 ----------
-  // 口径（刻意只用一个键，避免同一条街中段突然变色）：
-  //   · 有路名 → 按路名计数（整条街一个颜色，符合"这条路走过 2 次"的直觉）
-  //   · 没路名 → 按 ~55m 网格计数（够粗，跨天再走同一条街也落在同格）
-  // 另加两条规则：① 距离很近就回到同一格不算新的一遍（抗 GPS/规划点抖动）
-  //              ② 重置时刻之前的点不参与统计（按重置后的数据判定）
-  const HEAT_CELL = 0.0005;      // ≈55m(纬) / ≈50m(经，广州纬度)
-  const HEAT_JITTER_GAP = 6;     // 6 个点之内回到同一格视为同一遍
-
-  function cellKey(p) {
-    if (!Number.isFinite(p && p.lat) || !Number.isFinite(p && p.lng)) return '';
-    return Math.round(p.lat / HEAT_CELL) + ',' + Math.round(p.lng / HEAT_CELL);
-  }
-
-  /** 统一键：有路名用路名，否则用网格 */
-  function heatKey(p) {
-    const r = String((p && p.road) || '').trim();
-    if (r) return 'R:' + r;
-    return cellKey(p);
-  }
-
-  /** 统计每个路段走过的次数：跨天/跨会话累加，同一天内连续同一键只算一遍 */
-  function buildRoadVisits(days, resetAt) {
-    const visits = {};
-    for (const day of (days || [])) {
-      const path = (day && day.path) || [];
-      let prevKey = null;
-      const lastIdx = {};
-      for (let idx = 0; idx < path.length; idx++) {
-        const p = path[idx];
-        if (resetAt && Number(p.t) > 0 && Number(p.t) < resetAt) { prevKey = null; continue; }
-        const key = heatKey(p);
-        if (!key) { prevKey = null; continue; }
-        if (key !== prevKey) {
-          const last = lastIdx[key];
-          if (last === undefined || idx - last > HEAT_JITTER_GAP) visits[key] = (visits[key] || 0) + 1;
-          lastIdx[key] = idx;
-        }
-        prevKey = key;
-      }
-    }
-    return visits;
-  }
-
-  /** 某点的重叠次数：includeCurrent=true 时把"当前这一遍"也算上（实时绘制用） */
-  function visitsAt(key, lat, lng, includeCurrent) {
-    const k = String(key || '').trim() ? ('R:' + String(key).trim()) : cellKey({ lat, lng });
-    if (!k) return 0;
-    const hist = (state.roadVisits && state.roadVisits[k]) || 0;
-    if (!includeCurrent) return hist;
-    const done = (state.sessionKeys && state.sessionKeys[k]) || 0;
-    return hist + done + 1;
-  }
-
-  /** 历史绘制用：该点已经走过几次 */
-  function visitCountHistory(key, lat, lng) { return visitsAt(key, lat, lng, false); }
-
-  /** 实时绘制用：历史 + 本次已完成遍数 + 当前这一遍 */
-  function visitCountLive(key, lat, lng) { return visitsAt(key, lat, lng, true); }
-
-  /** 重叠条目数（用于日志提示） */
-  function overlapCount(visits) {
-    let n = 0;
-    for (const k in visits) if (visits[k] >= 2) n++;
-    return n;
-  }
   // ------------------------------------------------------------------
   // 断网自动暂停：离线时引擎无法规划路线，会退化成"直线兜底"走出不贴路的轨迹，
   // 所以断网立即暂停；恢复联网后自动继续（手动暂停过则不自动恢复）
@@ -1463,18 +1382,8 @@
   }
 
   function onEngineUpdate(s) {
-    // 记录本次行走经过的路段（重叠热力着色：同一处再走一遍就变热色）
-    {
-      const hk = heatKey(s);
-      if (hk && hk !== state.lastHeatKey) {
-        if (state.lastHeatKey) state.sessionKeys[state.lastHeatKey] = (state.sessionKeys[state.lastHeatKey] || 0) + 1;
-        state.lastHeatKey = hk;
-      }
-    }
-    if (s.road && s.road !== state.lastRoadKey) {
-      if (state.lastRoadKey) state.sessionRuns[state.lastRoadKey] = (state.sessionRuns[state.lastRoadKey] || 0) + 1;
-      state.lastRoadKey = s.road;
-    }
+
+
     const modes = window.NetWalkSpeed.MODES;
     const m = modes[s.mode] || modes.walk;
     el.speed.innerHTML = `${s.speedKmh.toFixed(1)}<small>km/h</small>`;    el.mode.textContent = `${m.icon} ${m.label}`;

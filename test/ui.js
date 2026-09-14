@@ -239,76 +239,13 @@ const shown = (id) => $(id).classList.contains('show');
   // C-3：重叠热力着色 + 修复分段（0.9.20）
   console.log('\n== C-3. 重叠按次数着色 ==');
   ok('全局「轨迹整备」按钮已移除', !doc.getElementById('btnSnapTrack'));
-  ok('热力统计工具已导出', !!(RU.buildRoadVisits && RU.segKey && RU.nextPieceIndex));
-  const days2 = [
-    { date: '2026-09-13', path: [
-      { lat: 22.5, lng: 114.0, road: '解放北路' }, { lat: 22.501, lng: 114.0, road: '解放北路' },
-      { lat: 22.502, lng: 114.0, road: '中山五路' },
-    ] },
-    { date: '2026-09-14', path: [
-      { lat: 22.5, lng: 114.0, road: '解放北路' }, { lat: 22.501, lng: 114.0, road: '解放北路' },
-      { lat: 22.502, lng: 114.0, road: '中山五路' }, { lat: 22.503, lng: 114.0, road: '中山五路' },
-    ] },
-  ];
-  const visits = RU.buildRoadVisits(days2);
-  ok('同一路段跨天累加次数（解放北路=2）', visits['R:解放北路'] === 2, JSON.stringify(visits).slice(0, 160));
-  ok('同一天内连续同名只算 1 遍（中山五路=2）', visits['R:中山五路'] === 2, String(visits['R:中山五路']));
-  ok('重叠路段计数（overlapCount>=2）', RU.overlapCount(visits) >= 2, String(RU.overlapCount(visits)));
-  // 关键回归：两次走同一条街但坐标略有偏差（不同天路线点不完全重合）→ 仍应判为重叠
-  const jitterDay = [
-    { date: '2026-09-12', path: [{ lat: 22.5, lng: 114.0, road: '' }, { lat: 22.5, lng: 114.0004, road: '' }] },
-    { date: '2026-09-13', path: [{ lat: 22.50009, lng: 114.00002, road: '' }, { lat: 22.50011, lng: 114.00042, road: '' }] },
-  ];
-  const jv = RU.buildRoadVisits(jitterDay);
-  const hotCells = Object.keys(jv).filter((k) => k.indexOf('R:') !== 0 && jv[k] >= 2).length;
-  ok('坐标有偏差的同一条街也判为重叠（30m 网格）', hotCells >= 1, 'hotCells=' + hotCells + ' total=' + Object.keys(jv).length);
-  // 新口径（v0.9.22）：有路名按路名（整条街一个颜色，中途不变色）
-  const sameRoad = [
-    { date: '2026-09-14', path: [
-      { lat: 22.5, lng: 114.0, road: '解放北路' }, { lat: 22.5, lng: 114.002, road: '解放北路' },
-      { lat: 22.5, lng: 114.004, road: '解放北路' }, { lat: 22.5, lng: 114.006, road: '解放北路' },
-    ] },
-  ];
-  const vSame = RU.buildRoadVisits(sameRoad, 0);
-  ok('同一条街连续多段只算 1 遍（整条街一个颜色）', vSame['R:解放北路'] === 1, JSON.stringify(vSame).slice(0, 120));
-  ok('有路名时不再按网格重复计数', Object.keys(vSame).length === 1, Object.keys(vSame).join(','));
-  ok('heatKey: 有路名用路名键', RU.heatKey({ lat: 22.5, lng: 114.0, road: '解放北路' }) === 'R:解放北路');
-  ok('heatKey: 无路名回落到网格键', RU.heatKey({ lat: 22.5, lng: 114.0, road: '' }).indexOf('R:') !== 0);
-  // 抗抖动：同一格在很近的间距内被反复进出，只算一遍
-  const jit = [{ date: '2026-09-14', path: [
-    { lat: 22.5, lng: 114.0, road: '' }, { lat: 22.5, lng: 114.0002, road: '' },
-    { lat: 22.5, lng: 114.0, road: '' }, { lat: 22.5, lng: 114.0002, road: '' },
-  ] }];
-  const vJit = RU.buildRoadVisits(jit, 0);
-  ok('抗抖动：近距离反复进出同一格只算 1 遍', Math.max.apply(null, Object.values(vJit)) === 1, JSON.stringify(vJit));
-  // 忽略重置前的数据
-  const T0 = 1700000000000;
-  const preReset = [{ date: '2026-09-14', path: [
-    { t: T0 - 10000, lat: 22.5, lng: 114.0, road: '旧街' }, { t: T0 - 9000, lat: 22.5, lng: 114.001, road: '旧街' },
-    { t: T0 + 1000, lat: 22.5, lng: 114.002, road: '新街' }, { t: T0 + 2000, lat: 22.5, lng: 114.003, road: '新街' },
-  ] }];
-  const vReset = RU.buildRoadVisits(preReset, T0);
-  ok('重置前的点不参与重叠统计', vReset['R:旧街'] === undefined && vReset['R:新街'] === 1, JSON.stringify(vReset));
-  ok('不传 resetAt 时旧点照常统计', RU.buildRoadVisits(preReset, 0)['R:旧街'] === 1);
-  // 跨天同一条街 = 2 遍（该亮热力色）
-  const twoDays = [{ date: '2026-09-13', path: [{ lat: 22.5, lng: 114.0, road: '中山五路' }] },
-    { date: '2026-09-14', path: [{ lat: 22.5, lng: 114.0, road: '中山五路' }] }];
-  ok('跨天走同一条街 → 2 遍（亮青）', RU.buildRoadVisits(twoDays, 0)['R:中山五路'] === 2);
-  const Dp = win.DrillProvider;
-  if (Dp) {
-    const dp = new Dp({});
-    dp.setVisitLookup((k) => ({ 热路: 4 })[k] || 0);
-    ok('重叠 4 次 → 热力色下标 12', dp._heatIndex('热路') === 12, String(dp._heatIndex('热路')));
-    ok('只走过 1 次 → 不触发热力色（-1）', dp._heatIndex('新路') === -1, String(dp._heatIndex('新路')));
-    ok('无查询函数时安全返回 -1', (() => { const d2 = new Dp({}); return d2._heatIndex('任意') === -1; })());
-    ok('演练图已扩展 4 条热力色轨迹层（dTrack10..13）',
-      ['10', '11', '12', '13'].every((i) => doc.getElementById('dTrack' + i)));
-  } else { ok('DrillProvider 可访问（跳过热力色断言）', false, 'window.DrillProvider 缺失'); }
   // 修复分段：每段 ~200m 且端点取原始点
   const mkRun = (n, stepDeg) => Array.from({ length: n }, (_, i) => ({ lat: 22.5, lng: 114.0 + i * stepDeg, road: '某路' }));
   const run500 = mkRun(11, 0.0005);   // 每步 ~51m，共 ~510m
   const j1 = RU.nextPieceIndex(run500, 0, 200);
-  ok('修复分段终点落在 ~200m 处（4 步 ≈ 205m）', j1 === 4, 'j=' + j1 + ' len=' + run500.length + ' fn=' + String(RU.nextPieceIndex).slice(0, 90));
+  ok('演练图热力层已移除（dTrack 只有 0..9）',
+    ![10, 11, 12, 13].some((i) => doc.getElementById('dTrack' + i)));
+    ok('修复分段终点落在 ~200m 处（4 步 ≈ 205m）', j1 === 4, 'j=' + j1 + ' len=' + run500.length + ' fn=' + String(RU.nextPieceIndex).slice(0, 90));
   const j2 = RU.nextPieceIndex(run500, j1, 200);
   ok('第二段继续推进且不越界', j2 > j1 && j2 < run500.length, 'j1=' + j1 + ' j2=' + j2 + ' len=' + run500.length);
   const j3 = RU.nextPieceIndex(mkRun(3, 0.0005), 0, 200);
