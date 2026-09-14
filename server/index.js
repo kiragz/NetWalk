@@ -705,6 +705,16 @@ app.post('/api/places/add', (req, res) => {
   }
 });
 
+app.post('/api/places/remove', (req, res) => {
+  const body = req.body || {};
+  try {
+    const removed = placeStore.remove(body.date || todayStr(), body.name || '');
+    res.json({ ok: true, removed });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e && e.message ? e.message : String(e) });
+  }
+});
+
 app.get('/api/places', (req, res) => {
   const to = String(req.query.to || todayStr()).slice(0, 10);
   const from = String(req.query.from || to).slice(0, 10);

@@ -351,6 +351,15 @@ async function main() {
   const cfg15c = await J('/api/config');
   ok('15.3 可以再打开', cfg15c.hourlyMailArchive === true, 'value=' + cfg15c.hourlyMailArchive);
 
+  console.log('\n== 17. 收集册删除 ==');
+  const add17a = await post('/api/places/add', { date: today, places: [ { name: '待删医院', cat: '医院', lat: 23.2, lng: 113.4 } ] });
+  ok('17.1 收录待删地点', add17a.ok && add17a.added === 1, JSON.stringify(add17a).slice(0,80));
+  const rm17 = await post('/api/places/remove', { date: today, name: '待删医院' });
+  ok('17.2 删除成功', rm17.ok && rm17.removed === 1, JSON.stringify(rm17).slice(0,80));
+  const sum17b = await J('/api/places/summary?from=0000-01-01&to=' + today);
+  ok('17.3 删除后汇总不再包含', !(sum17b.byCat || {})['医院'], JSON.stringify(sum17b).slice(0,100));
+  const rm17b = await post('/api/places/remove', { date: today, name: '不存在的地点' });
+  ok('17.4 删除不存在的地点返回 0', rm17b.ok && rm17b.removed === 0, JSON.stringify(rm17b).slice(0,80));
   console.log(`\n===== 端到端结果：${pass} 通过 / ${fail} 失败 =====\n`);
   return fail ? 1 : 0;
 }

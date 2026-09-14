@@ -65,6 +65,21 @@ class PlaceStore {
     return { ok: true, days };
   }
 
+  /** 删除某天的某个地点（按名称精确匹配）；返回删除的条数 */
+  remove(date, name) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(String(date || ''))) throw new Error('日期格式应为 YYYY-MM-DD');
+    const key = String(name || '').trim();
+    if (!key) return 0;
+    const data = this.load();
+    const list = data.days[date];
+    if (!Array.isArray(list)) return 0;
+    const before = list.length;
+    data.days[date] = list.filter((p) => p.name !== key);
+    const removed = before - data.days[date].length;
+    if (removed) this.save(data);
+    return removed;
+  }
+
   /** 汇总：总地点数 / 覆盖天数 / 各类别数量 */
   summary(from, to) {
     const { days } = this.range(from, to);
