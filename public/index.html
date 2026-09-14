@@ -21,7 +21,7 @@
   <header class="topbar" data-page-node-id="ddrJhtR5e5RhxcM4HEN3M4">
     <div class="brand" data-page-node-id="8DH2ofHV66qbHEOc2uAOXh">Net<span data-page-node-id="Gt7m3YCBqixEngqyYKio6f">Walk</span></div>
     <button class="ver-pill" id="btnAccount" title="账号与档案">👤 未登录</button>
-    <button class="ver-pill" id="btnVersion" title="查看版本更新概要">v0.9.22</button>
+    <button class="ver-pill" id="btnVersion" title="查看版本更新概要">v0.9.23</button>
     <div class="pill" id="pillMap" data-page-node-id="GjTS25Bi1mrlBafIXfCBl3">地图加载中</div>
     <div class="pill" id="pillNet" data-page-node-id="Snjd11zKSBJFXSszeLhDMN">网络采集中</div>
     <div class="pill" id="pillKey" data-page-node-id="h2AOMKNxwH67HjkAsxSCgU">击键采集中</div>
@@ -370,13 +370,14 @@
     <div id="statsDaily" data-page-node-id="DqSjqTb6DOKzA4GZpMMTmi"></div>
     <div class="hint" style="margin-top:8px">
       🩹 <b>区域修复</b>：点按钮后在地图上拖拽框选，<b>框内的轨迹</b>会逐段（约 200 米）重新沿真实道路规划 ——
-      断网时走出直线的那段用它最合适。框外轨迹原样不动，规划失败的段也保留原样，统计口径不变。
+      断网时走出直线的那段用它最合适。框外轨迹原样不动；规划结果绕远或异常时会自动保留原样，修复后若框内轨迹会变空则整次放弃（原数据不动），还可用「↩ 撤销修复」还原。
       <br>🔁 <b>重叠着色</b>：同一条路走过的次数越多颜色越"热" —— <span style="color:#3ad9ff">2 次=青</span>
       <span style="color:#3ddc97">3 次=绿</span> <span style="color:#a97bff">4 次=紫</span>
       <span style="color:#ff5cc8">5 次以上=洋红</span>（只走过 1 次的仍按速度着色）。
     </div>
     <div class="modal-acts" data-page-node-id="Jq351zElvaAVjqqAciFJsX">
       <button class="btn" id="btnRepairArea" title="在地图上拖拽框选区域，只把框内的轨迹重新吸附到道路上">🩹 区域修复</button>
+      <button class="btn" id="btnRepairUndo" title="恢复成上一次区域修复之前的轨迹（只对修复过的当天有效）">↩ 撤销修复</button>
       <button class="btn primary" id="btnStatsClose" data-page-node-id="4VLyMIuq83vyRCqfbLb16P">关闭</button>
     </div>
   </div>

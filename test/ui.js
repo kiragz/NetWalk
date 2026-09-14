@@ -206,6 +206,16 @@ const shown = (id) => $(id).classList.contains('show');
   ok('框选矩形 + 确认条元素存在', !!$('pickBox') && !!$('repairBar') && !!$('repairInfo'));
   ok('NetWalkRepairUtil 已导出', !!(win.NetWalkRepairUtil && win.NetWalkRepairUtil.splitByDistance));
   const RU = win.NetWalkRepairUtil;
+  ok('撤销修复按钮存在', !!$('btnRepairUndo'));
+  // 修复护栏：绕远/异常的规划结果必须被拒绝，避免"越修越没有"
+  const piece0 = [{ lat: 22.5, lng: 114.0 }, { lat: 22.5, lng: 114.002 }];
+  ok('护栏：正常路线通过', RU.routeSane({ points: [{ lat: 22.5, lng: 114.0 }, { lat: 22.5, lng: 114.002 }] }, piece0) === true);
+  ok('护栏：跑远 1km 的路线被拒绝', RU.routeSane({ points: [{ lat: 22.5, lng: 114.0 }, { lat: 22.51, lng: 114.01 }] }, piece0) === false);
+  ok('护栏：点数不足的路线被拒绝', RU.routeSane({ points: [{ lat: 22.5, lng: 114.0 }] }, piece0) === false);
+  const windy = [];
+  for (let i = 0; i < 40; i++) windy.push({ lat: 22.5, lng: 114.0 + (i % 2) * 0.0004 });
+  ok('护栏：来回折返的超长绕路被拒绝', RU.routeSane({ points: windy }, piece0) === false);
+  ok('bboxOf 算出包围盒', JSON.stringify(RU.bboxOf(piece0)).indexOf('22.5') >= 0);
   const segs = RU.splitByDistance([
     { lat: 22.5, lng: 114.0 }, { lat: 22.5, lng: 114.004 }, { lat: 22.5, lng: 114.008 },
     { lat: 22.5, lng: 114.012 }, { lat: 22.5, lng: 114.016 },

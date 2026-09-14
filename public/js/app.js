@@ -99,6 +99,7 @@
     mailBoxStatus: $('mailBoxStatus'), btnMailStatus: $('btnMailStatus'), btnMailPush: $('btnMailPush'),
     autoMailArchive: $('autoMailArchive'), hourlyMailArchive: $('hourlyMailArchive'), btnMailClean: $('btnMailClean'),
     btnSnapTrack: $('btnSnapTrack'), btnFollow: $('btnFollow'),
+    btnRepairUndo: $('btnRepairUndo'),
     maskSyncFirst: $('maskSyncFirst'), btnSyncFirstGo: $('btnSyncFirstGo'), btnSyncFirstSkip: $('btnSyncFirstSkip'), syncFirstHint: $('syncFirstHint'),
     btnRepairArea: $('btnRepairArea'), btnRepairGo: $('btnRepairGo'), btnRepairCancel: $('btnRepairCancel'),
     repairInfo: $('repairInfo'), repairBar: $('repairBar'), pickBox: $('pickBox'), netBanner: $('netBanner'),
@@ -584,8 +585,11 @@
     window.NetWalkDebug = {
       state,
       resetSyncPrompt() { state.syncPromptDone = false; },
+      repairArea,
+      loadAllDays,
+      drawHistoryOnMap,
     };
-    window.NetWalkRepairUtil = { splitByDistance, insideBounds, countInBounds, segKey: cellKey, cellKey, heatKey, buildRoadVisits, overlapCount, nextPieceIndex, visitsAt };
+    window.NetWalkRepairUtil = { splitByDistance, insideBounds, countInBounds, segKey: cellKey, cellKey, heatKey, buildRoadVisits, overlapCount, nextPieceIndex, visitsAt, bboxOf, pathLen, routeSane };
     bindProfileUi();
     setupLocalKeyFallback();
     checkProfile();
@@ -1141,6 +1145,34 @@
     return p.lat >= b.minLat && p.lat <= b.maxLat && p.lng >= b.minLng && p.lng <= b.maxLng;
   }
 
+  /** 一段折线的包围盒 */
+  function bboxOf(pts) {
+    let minLat = 90, maxLat = -90, minLng = 180, maxLng = -180;
+    for (const p of pts) {
+      if (p.lat < minLat) minLat = p.lat; if (p.lat > maxLat) maxLat = p.lat;
+      if (p.lng < minLng) minLng = p.lng; if (p.lng > maxLng) maxLng = p.lng;
+    }
+    return { minLat, maxLat, minLng, maxLng };
+  }
+
+  function pathLen(pts) {
+    let d = 0;
+    for (let k = 1; k < pts.length; k++) d += haversineKm(pts[k - 1], pts[k]);
+    return d;
+  }
+
+  /** 规划结果是否可信：不能跑出原始范围 330m 以上，长度也不能超过原始的 3 倍（防止绕远把轨迹"修没了"） */
+  function routeSane(route, piece) {
+    if (!route || !Array.isArray(route.points) || route.points.length < 2) return false;
+    const bb = bboxOf(piece);
+    const pad = 0.003;   // ≈330m
+    for (const q of route.points) {
+      if (q.lat < bb.minLat - pad || q.lat > bb.maxLat + pad || q.lng < bb.minLng - pad || q.lng > bb.maxLng + pad) return false;
+    }
+    const rawLen = pathLen(piece) || 1;
+    return pathLen(route.points) <= rawLen * 3 + 200;
+  }
+
   /** 修复分段：从 i 出发按累计 ~stepM 米找本段终点下标（终点必定是原始轨迹点，保证修复后仍贴用户走向） */
   function nextPieceIndex(run, i, stepM) {
     let j = i + 1, acc = 0;
@@ -1215,7 +1247,7 @@
    */
   async function repairArea(bounds) {
     const days = await loadAllDays();
-    let daysFixed = 0, segOK = 0, segKeep = 0, ptsIn = 0;
+    let daysFixed = 0, segOK = 0, segKeep = 0, segWild = 0, ptsIn = 0, skipped = 0;
     const planOne = async (a, b) => {
       try {
         const r = await Promise.race([
@@ -1225,29 +1257,31 @@
         return (r && r.points && r.points.length >= 2) ? r : null;
       } catch (_) { return null; }
     };
-    /** 把框内的一段轨迹重新沿道路规划（端点锚定原轨迹点） */
+    /** 把框内的一段轨迹重新沿道路规划（端点锚定原轨迹点；任何异常都保留原始点，绝不丢） */
     const repairRun = async (run, emit) => {
       ptsIn += run.length;
+      if (run.length < 2) { emit(run); return; }   // 单点段原样保留（曾经会把这点删掉）
       const STEP_M = 200;          // 每 ~200m 一个规划单元
       let i = 0;
       let first = true;
       while (i < run.length - 1) {
         const j = nextPieceIndex(run, i, STEP_M);
+        const piece = run.slice(i, j + 1);
         const route = await planOne(run[i], run[j]);
-        if (route) {
-          const mapped = retimeChunk(route, run.slice(i, j + 1));
+        if (route && routeSane(route, piece)) {
+          const mapped = retimeChunk(route, piece);
           emit(first ? mapped : mapped.slice(1));   // 首点与上一段共享，避免重复
           segOK++;
         } else {
-          emit(first ? run.slice(i, j) : run.slice(i, j));   // 保留原样（不含端点 j，归下一段）
+          if (route) segWild++;
+          emit(first ? piece.slice(0, -1) : piece.slice(0, -1));   // 保留原样（端点归下一段）
           segKeep++;
         }
         first = false;
         i = j;
       }
-      if (run.length >= 2) emit([run[run.length - 1]]);   // 段尾点
+      emit([run[run.length - 1]]);   // 段尾点
     };
-
     for (const day of days) {
       const path = day.path || [];
       if (path.length < 2) continue;
@@ -1265,6 +1299,11 @@
         i = j;
       }
       if (!changed) continue;
+      // 安全校验：修复不能把框内轨迹弄没，也不能让全天点数塌掉一半以上
+      const inBoxAfter = out.filter((p) => insideBounds(p, bounds)).length;
+      const inBoxBefore = path.filter((p) => insideBounds(p, bounds)).length;
+      if (inBoxBefore > 0 && inBoxAfter === 0) { skipped++; log(`⚠ ${day.date} 修复后框内轨迹会变空，已放弃这次修改（原数据未动）`); continue; }
+      if (out.length < path.length * 0.5) { skipped++; log(`⚠ ${day.date} 修复后点数从 ${path.length} 掉到 ${out.length}，疑似异常，已放弃这次修改（原数据未动）`); continue; }
       const w = await fetch('/api/track/rewrite', {
         method: 'POST', headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ date: day.date, points: out }),
@@ -1272,7 +1311,7 @@
       if (w.ok) daysFixed++;
     }
     drawHistoryOnMap(state.origin);
-    return { daysFixed, segOK, segKeep, ptsIn };
+    return { daysFixed, segOK, segKeep, segWild, ptsIn, skipped };
   }
 
   let pickState = null;   // 框选进行中：{x0,y0,bounds}
@@ -1299,6 +1338,26 @@
   function bindAreaRepairUi() {
     if (!el.btnRepairArea) return;
     el.btnRepairArea.addEventListener('click', startAreaRepair);
+    if (el.btnRepairUndo) {
+      el.btnRepairUndo.addEventListener('click', async () => {
+        el.btnRepairUndo.disabled = true;
+        try {
+          const r = await fetch('/api/track/range?from=0000-01-01&to=' + today()).then((x) => x.json());
+          const days = (r && r.days) || [];
+          let undone = 0;
+          for (const day of days) {
+            const w = await fetch('/api/track/restore-backup', {
+              method: 'POST', headers: { 'Content-Type': 'application/json' },
+              body: JSON.stringify({ date: day.date }),
+            }).then((x) => x.json());
+            if (w && w.ok) undone++;
+          }
+          if (undone) { log(`↩ 已撤销 ${undone} 天的区域修复，恢复成修复前的轨迹`); drawHistoryOnMap(state.origin); }
+          else log('没有可撤销的修复记录（只有修复过的当天才有备份）');
+        } catch (e) { log('撤销失败：' + (e && e.message ? e.message : e)); }
+        finally { el.btnRepairUndo.disabled = false; }
+      });
+    }
     if (el.btnRepairCancel) el.btnRepairCancel.addEventListener('click', () => { exitPickMode(); log('已取消区域修复'); });
     if (el.btnRepairGo) {
       el.btnRepairGo.addEventListener('click', async () => {
@@ -1309,7 +1368,11 @@
         el.btnRepairGo.textContent = '修复中…';
         try {
           const r = await repairArea(b);
-          log(`🩹 区域修复完成：${r.ptsIn} 个点在框内，重规划 ${r.segOK} 段（${r.segKeep} 段失败保留），涉及 ${r.daysFixed} 天；统计口径不变。`);
+          log(`🩹 区域修复完成：${r.ptsIn} 个点在框内，重规划 ${r.segOK} 段；${r.segKeep} 段保留原样`
+            + (r.segWild ? `（其中 ${r.segWild} 段规划结果绕远、已按原样保留）` : '')
+            + (r.skipped ? `；${r.skipped} 天因安全校验放弃修改` : '')
+            + `，涉及 ${r.daysFixed} 天；统计口径不变。`);
+          if (r.daysFixed) log('↩ 修复不满意可以点「↩ 撤销修复」还原成修复前的轨迹。');
           if (!r.segOK) log('⚠ 框内没有可修复的轨迹段（可能是单点或规划全部失败）。');
         } catch (e) {
           log('区域修复失败：' + (e && e.message ? e.message : e));

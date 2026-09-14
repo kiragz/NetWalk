@@ -323,6 +323,24 @@ async function main() {
   const sn14b = await post('/api/session/start', { date: today, city: '深圳', scope: 'city', lat: 22.61, lng: 114.11 });
   ok('14.6 下一次出发序号 = 合并后总数 + 1', sn14b.sessionNo === ns14.length + 1, 'sessionNo=' + sn14b.sessionNo + ' total=' + ns14.length);
 
+  console.log('\n== 16. 区域修复可撤销（覆写前留备份） ==');
+  const before16 = await J('/api/track/range?from=0000-01-01&to=' + today);
+  const ptsBefore16 = (before16.days || []).reduce((n, d) => n + (d.path || []).length, 0);
+  await post('/api/track/rewrite', { date: today, points: [
+    { t: Date.now() - 5000, lat: 23.20, lng: 113.40, road: '修复路', spd: 5, mode: 'walk' },
+    { t: Date.now() - 4000, lat: 23.2005, lng: 113.40, road: '修复路', spd: 5, mode: 'walk' },
+  ] });
+  const mid16 = await J('/api/track/range?from=0000-01-01&to=' + today);
+  const today16 = (mid16.days || []).find((d) => d.date === today) || { path: [] };
+  ok('16.1 修复覆写已生效（当天只剩修复后的 2 个点）', (today16.path || []).length === 2, 'today=' + (today16.path || []).length);
+  const undo16 = await post('/api/track/restore-backup', { date: today });
+  ok('16.2 撤销成功', undo16.ok === true, JSON.stringify(undo16).slice(0, 80));
+  const after16 = await J('/api/track/range?from=0000-01-01&to=' + today);
+  const ptsAfter16 = (after16.days || []).reduce((n, d) => n + (d.path || []).length, 0);
+  ok('16.3 撤销后恢复到修复前的点数', ptsAfter16 === ptsBefore16, 'restored=' + ptsAfter16 + ' want=' + ptsBefore16);
+  const undo16b = await post('/api/track/restore-backup', { date: today });
+  ok('16.4 无备份时撤销给出提示', undo16b.ok === false && !!undo16b.error, JSON.stringify(undo16b).slice(0, 80));
+
   console.log('\n== 15. 每小时自动存档配置 ==');
   const cfg15 = await J('/api/config');
   ok('15.1 hourlyMailArchive 默认开启', cfg15.hourlyMailArchive !== false, 'value=' + cfg15.hourlyMailArchive);

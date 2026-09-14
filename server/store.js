@@ -441,10 +441,26 @@ class TrackStore {
     }
     if (clean.length < 2) throw new Error('有效轨迹点不足 2 个，已放弃替换');
     const data = this.load(date);
+    // 覆写前留一份原始轨迹（区域修复是破坏性操作，出问题要能一键撤销）
+    if (Array.isArray(data.path) && data.path.length >= 2) {
+      data.pathBackup = { at: now, path: data.path };
+    }
     data.path = clean;
     this.markDirty(date);
     this.flush();
     return clean.length;
+  }
+
+  /** 撤销上一次 rewritePath（恢复 pathBackup），返回恢复后的点数；无可恢复则返回 null */
+  restorePathBackup(date) {
+    const data = this.load(date);
+    const bk = data && data.pathBackup;
+    if (!bk || !Array.isArray(bk.path) || bk.path.length < 2) return null;
+    data.path = bk.path;
+    delete data.pathBackup;
+    this.markDirty(date);
+    this.flush();
+    return data.path.length;
   }
 
   /** 结束当天漫游，写入汇总统计 */

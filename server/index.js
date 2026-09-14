@@ -661,6 +661,21 @@ app.post('/api/track/rewrite', (req, res) => {
   }
 });
 
+/** 撤销上一次区域修复（恢复 rewritePath 之前的轨迹） */
+app.post('/api/track/restore-backup', (req, res) => {
+  const body = req.body || {};
+  const date = String(body.date || todayStr()).slice(0, 10);
+  if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ ok: false, error: '日期格式应为 YYYY-MM-DD' });
+  try {
+    const n = store.restorePathBackup(date);
+    if (n === null) return res.json({ ok: false, error: '没有可恢复的原始轨迹（未修复过）' });
+    logLine('track restore-backup: ' + date + ' -> ' + n + ' points');
+    res.json({ ok: true, date, points: n });
+  } catch (e) {
+    res.status(400).json({ ok: false, error: e && e.message ? e.message : String(e) });
+  }
+});
+
 app.post('/api/session/start', (req, res) => {
   const body = req.body || {};
   const date = body.date || todayStr();
