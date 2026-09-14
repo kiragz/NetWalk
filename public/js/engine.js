@@ -479,6 +479,18 @@
         this.route = route;
         this.traveled = 0;
 
+        // 连续直线兜底计数：规划不可用（多为断网/接口超时）时连续兜底 3 次以上，
+        // 说明网络确实不可用 —— 通知外层自动暂停，避免继续走出不贴路的轨迹。
+        if (route.straight) {
+          this._planFailStreak = (this._planFailStreak || 0) + 1;
+          if (this._planFailStreak >= 3 && typeof this.onPlanUnavailable === 'function') {
+            this._planFailStreak = 0;   // 只通知一次，避免反复触发
+            this.onPlanUnavailable();
+          }
+        } else {
+          this._planFailStreak = 0;
+        }
+
         // 顺路直走的连击记账：路线里出现别的路名 → 这条路到头了，恢复 ROLL；
         // 还在同一条路上 → 连击 +1（下一段更远）。普通直行也累计连击。
         if (cruise) {

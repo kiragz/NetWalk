@@ -99,6 +99,8 @@
     mailBoxStatus: $('mailBoxStatus'), btnMailStatus: $('btnMailStatus'), btnMailPush: $('btnMailPush'),
     autoMailArchive: $('autoMailArchive'), btnMailClean: $('btnMailClean'),
     btnSnapTrack: $('btnSnapTrack'), btnFollow: $('btnFollow'),
+    btnRepairArea: $('btnRepairArea'), btnRepairGo: $('btnRepairGo'), btnRepairCancel: $('btnRepairCancel'),
+    repairInfo: $('repairInfo'), repairBar: $('repairBar'), pickBox: $('pickBox'), netBanner: $('netBanner'),
     btnRgLogin: $('btnRgLogin'),
     btnSecClear: $('btnSecClear'), secHint: $('secHint'),
     mVisited: $('mVisited'), mLit: $('mLit'),
@@ -110,6 +112,7 @@
     engine: null,
     ws: null,
     started: false,
+    autoPausedByNet: false,   // 断网自动暂停标记（恢复联网后自动继续）
     netAvailable: false,
     keyMode: 'none',
     channel: ('BroadcastChannel' in window) ? new BroadcastChannel('netwalk') : null,
@@ -556,6 +559,9 @@
     await initProvider(state.origin);
     connectWs();
     bindUi();
+    initNetWatch();
+    // 供测试/外部调用的纯函数（区域修复的分段与判定逻辑）
+    window.NetWalkRepairUtil = { splitByDistance, insideBounds, countInBounds };
     bindProfileUi();
     setupLocalKeyFallback();
     checkProfile();
@@ -695,6 +701,8 @@
       let msg;
       try { msg = JSON.parse(ev.data); } catch (_) { return; }
       if (msg.type !== 'tick') return;
+      // 连上服务端（收到 tick）说明连接已恢复 → 解除断网自动暂停
+      if (state.autoPausedByNet) autoResumeForNet();
       state.netAvailable = Boolean(msg.net && msg.net.available);
       state.keyMode = (msg.key && msg.key.mode) || 'none';
       el.pillNet.textContent = state.netAvailable
@@ -712,6 +720,8 @@
     ws.onclose = () => {
       el.pillNet.textContent = '连接中断，重连中';
       el.pillNet.className = 'pill warn';
+      // 与服务端断开时无法写入轨迹 → 一律自动暂停（恢复后自动继续）
+      autoPauseForNet('与服务端连接中断');
       setTimeout(connectWs, 2500);
     };
     ws.onerror = () => { try { ws.close(); } catch (_) { /* noop */ } };
@@ -838,6 +848,8 @@
       onUpdate: onEngineUpdate,
       onRoll: onEngineRoll,
       onLog: log,
+      // 连续 3 次路线规划失败（多为断网）→ 自动暂停，避免继续走出不贴路的直线段
+      onPlanUnavailable: () => autoPauseForNet('路线规划连续失败（网络似乎不可用）'),
     });
 
     if (resume) {
@@ -1029,6 +1041,259 @@
     } finally {
       btn.disabled = false; btn.textContent = old;
     }
+  }
+
+  // ------------------------------------------------------------------
+  // 断网自动暂停：离线时引擎无法规划路线，会退化成"直线兜底"走出不贴路的轨迹，
+  // 所以断网立即暂停；恢复联网后自动继续（手动暂停过则不自动恢复）
+  // ------------------------------------------------------------------
+  function showNetBanner(text) {
+    if (!el.netBanner) return;
+    el.netBanner.textContent = text;
+    el.netBanner.classList.add('show');
+  }
+
+  function hideNetBanner() {
+    if (el.netBanner) el.netBanner.classList.remove('show');
+  }
+
+  function autoPauseForNet(reason) {
+    if (!state.started) return;
+    state.autoPausedByNet = true;
+    if (!state.engine || state.engine.isPaused()) return;
+    state.engine.pause();
+    if (el.btnPause) el.btnPause.textContent = '继续';
+    log(`⚠ ${reason}，已自动暂停漫游 —— 断网时继续走无法规划路线，会走出不贴路的轨迹。恢复联网后会自动继续。`);
+    showNetBanner(`⚠ ${reason} · 已自动暂停，联网后自动继续`);
+  }
+
+  function autoResumeForNet() {
+    if (!state.autoPausedByNet) return;
+    if (!state.started) { state.autoPausedByNet = false; return; }
+    if (navigator.onLine === false) return;   // 还没恢复
+    state.autoPausedByNet = false;
+    if (state.engine && state.engine.isPaused()) {
+      state.engine.resume();
+      if (el.btnPause) el.btnPause.textContent = '暂停';
+    }
+    log('✅ 网络已恢复，自动继续漫游');
+    hideNetBanner();
+  }
+
+  function initNetWatch() {
+    window.addEventListener('offline', () => autoPauseForNet('检测到本机网络已断开'));
+    window.addEventListener('online', () => autoResumeForNet());
+    // 兜底轮询：某些断网场景不触发 offline 事件（如只断外网、网卡还在）
+    setInterval(() => {
+      if (!state.started) return;
+      if (navigator.onLine === false) autoPauseForNet('检测到本机网络已断开');
+    }, 5000);
+  }
+
+  // ------------------------------------------------------------------
+  // 区域轨迹修复：框选一块区域 → 只把框内的轨迹重新沿真实道路规划
+  // ------------------------------------------------------------------
+  /** 按累计距离把点列切成 ≤maxM 米的小段（相邻段共享边界点，保证连续） */
+  function splitByDistance(pts, maxM) {
+    const out = [];
+    let cur = [];
+    for (let i = 0; i < pts.length; i++) {
+      cur.push(pts[i]);
+      if (cur.length >= 2 && i < pts.length - 1) {
+        const d = haversineKm(cur[0], cur[cur.length - 1]) * 1000;
+        if (d >= maxM) { out.push(cur); cur = [pts[i]]; }
+      }
+    }
+    if (cur.length) out.push(cur);
+    return out;
+  }
+
+  function insideBounds(p, b) {
+    return p.lat >= b.minLat && p.lat <= b.maxLat && p.lng >= b.minLng && p.lng <= b.maxLng;
+  }
+
+  /** 统计框内点数/段数/涉及天数（用于确认条提示，不写盘） */
+  function countInBounds(days, b) {
+    let pts = 0, runs = 0, dayN = 0;
+    for (const day of days) {
+      const path = day.path || [];
+      let hit = 0, run = 0, started = false;
+      for (const p of path) {
+        if (insideBounds(p, b)) { hit++; run++; if (!started) { runs++; started = true; } }
+        else started = false;
+      }
+      if (hit) { pts += hit; dayN++; }
+      void run;
+    }
+    return { pts, runs, dayN };
+  }
+
+  async function loadAllDays() {
+    const r = await fetch('/api/track/range?from=0000-01-01&to=' + today()).then((x) => x.json());
+    return (r && r.days) || [];
+  }
+
+  /** 区域修复主流程：只替换落在框内的连续段，框外原样保留 */
+  async function repairArea(bounds) {
+    const days = await loadAllDays();
+    let daysFixed = 0, segOK = 0, segKeep = 0, ptsIn = 0;
+    for (const day of days) {
+      const path = day.path || [];
+      if (path.length < 2) continue;
+      if (!path.some((p) => insideBounds(p, bounds))) continue;
+      const out = [];
+      let i = 0, changed = false;
+      while (i < path.length) {
+        if (!insideBounds(path[i], bounds)) { out.push(path[i]); i++; continue; }
+        let j = i;
+        while (j < path.length && insideBounds(path[j], bounds)) j++;
+        const run = path.slice(i, j);
+        ptsIn += run.length;
+        for (const pc of splitByDistance(run, 500)) {
+          if (pc.length < 2) { out.push(...pc); continue; }
+          const a = pc[0], b = pc[pc.length - 1];
+          let route = null;
+          try {
+            route = await Promise.race([
+              state.provider.planRoute({ lat: a.lat, lng: a.lng }, { lat: b.lat, lng: b.lng }),
+              new Promise((res) => setTimeout(() => res(null), 8000)),
+            ]);
+          } catch (_) { route = null; }
+          if (route && route.points && route.points.length >= 2) {
+            out.push(...retimeChunk(route, pc));
+            segOK++; changed = true;
+          } else {
+            out.push(...pc); segKeep++;
+          }
+        }
+        i = j;
+      }
+      if (!changed) continue;
+      const w = await fetch('/api/track/rewrite', {
+        method: 'POST', headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ date: day.date, points: out }),
+      }).then((x) => x.json());
+      if (w.ok) daysFixed++;
+    }
+    drawHistoryOnMap(state.origin);
+    return { daysFixed, segOK, segKeep, ptsIn };
+  }
+
+  let pickState = null;   // 框选进行中：{x0,y0,bounds}
+
+  function exitPickMode() {
+    document.body.classList.remove('picking');
+    if (el.pickBox) { el.pickBox.classList.remove('show'); el.pickBox.style.display = 'none'; }
+    if (el.repairBar) el.repairBar.classList.remove('show');
+    const p = state.provider;
+    if (p && p.map && p.map.setStatus) { try { p.map.setStatus({ dragEnable: true }); } catch (_) {} }
+    pickState = null;
+  }
+
+  function startAreaRepair() {
+    const p = state.provider;
+    if (!p || p.name !== 'amap') { log('⚠ 区域修复需要高德模式（在线）——演练模式没有真实路网可吸附。'); return; }
+    if (el.maskStats) el.maskStats.classList.remove('show');
+    document.body.classList.add('picking');
+    log('🩹 请在地图上拖拽框选要修复的区域（框内轨迹会被重新吸附到道路上）');
+    try { p.map.setStatus({ dragEnable: false }); } catch (_) {}
+    pickState = { x0: 0, y0: 0, bounds: null };
+  }
+
+  function bindAreaRepairUi() {
+    if (!el.btnRepairArea) return;
+    el.btnRepairArea.addEventListener('click', startAreaRepair);
+    if (el.btnRepairCancel) el.btnRepairCancel.addEventListener('click', () => { exitPickMode(); log('已取消区域修复'); });
+    if (el.btnRepairGo) {
+      el.btnRepairGo.addEventListener('click', async () => {
+        const b = pickState && pickState.bounds;
+        if (!b) return;
+        el.btnRepairGo.disabled = true;
+        const old = el.btnRepairGo.textContent;
+        el.btnRepairGo.textContent = '修复中…';
+        try {
+          const r = await repairArea(b);
+          log(`🩹 区域修复完成：${r.ptsIn} 个点在框内，重规划 ${r.segOK} 段（${r.segKeep} 段失败保留），涉及 ${r.daysFixed} 天；统计口径不变。`);
+          if (!r.segOK) log('⚠ 框内没有可修复的轨迹段（可能是单点或规划全部失败）。');
+        } catch (e) {
+          log('区域修复失败：' + (e && e.message ? e.message : e));
+        } finally {
+          el.btnRepairGo.disabled = false;
+          el.btnRepairGo.textContent = old;
+          exitPickMode();
+        }
+      });
+    }
+    // 地图上拖拽框选
+    const box = el.pickBox;
+    const toGeo = (x, y) => {
+      const p = state.provider;
+      try {
+        const px = window.AMap && window.AMap.Pixel ? new window.AMap.Pixel(x, y) : { x, y };
+        const g = p.map.containerToLngLat(px);
+        return { lat: Number(g.lat != null ? g.lat : g.getLat()), lng: Number(g.lng != null ? g.lng : g.getLng()) };
+      } catch (_) { return null; }
+    };
+    const onDown = (ev) => {
+      if (!pickState) return;
+      const r = el.map.getBoundingClientRect();
+      pickState.x0 = ev.clientX - r.left;
+      pickState.y0 = ev.clientY - r.top;
+      pickState.dragging = true;
+      if (box) {
+        box.style.left = ev.clientX + 'px';
+        box.style.top = ev.clientY + 'px';
+        box.style.width = '0px';
+        box.style.height = '0px';
+        box.style.display = 'block';
+        box.classList.add('show');
+      }
+      ev.preventDefault();
+    };
+    const onMove = (ev) => {
+      if (!pickState || !pickState.dragging) return;
+      const r = el.map.getBoundingClientRect();
+      const x = ev.clientX - r.left, y = ev.clientY - r.top;
+      if (box) {
+        box.style.left = Math.min(ev.clientX, r.left + pickState.x0) + 'px';
+        box.style.top = Math.min(ev.clientY, r.top + pickState.y0) + 'px';
+        box.style.width = Math.abs(x - pickState.x0) + 'px';
+        box.style.height = Math.abs(y - pickState.y0) + 'px';
+      }
+    };
+    const onUp = async (ev) => {
+      if (!pickState || !pickState.dragging) return;
+      pickState.dragging = false;
+      const r = el.map.getBoundingClientRect();
+      const x = ev.clientX - r.left, y = ev.clientY - r.top;
+      if (Math.abs(x - pickState.x0) < 20 || Math.abs(y - pickState.y0) < 20) {
+        log('框选区域太小，请拖拽出一个明显的矩形区域');
+        exitPickMode();
+        return;
+      }
+      const g1 = toGeo(pickState.x0, pickState.y0);
+      const g2 = toGeo(x, y);
+      if (!g1 || !g2) { log('无法解析框选区域坐标，请重试'); exitPickMode(); return; }
+      pickState.bounds = {
+        minLat: Math.min(g1.lat, g2.lat), maxLat: Math.max(g1.lat, g2.lat),
+        minLng: Math.min(g1.lng, g2.lng), maxLng: Math.max(g1.lng, g2.lng),
+      };
+      if (el.btnRepairGo) el.btnRepairGo.disabled = true;
+      if (el.repairInfo) el.repairInfo.textContent = '正在统计框内轨迹…';
+      if (el.repairBar) el.repairBar.classList.add('show');
+      let info = { pts: 0, runs: 0, dayN: 0 };
+      try { info = countInBounds(await loadAllDays(), pickState.bounds); } catch (_) {}
+      if (el.repairInfo) el.repairInfo.textContent = info.pts
+        ? `框内 ${info.pts} 个轨迹点 · ${info.runs} 段 · 涉及 ${info.dayN} 天`
+        : '框内没有轨迹点，请重新框选';
+      if (el.btnRepairGo) el.btnRepairGo.disabled = !info.pts;
+      const p = state.provider;
+      try { p.map.setStatus({ dragEnable: true }); } catch (_) {}
+      document.body.classList.remove('picking');
+    };
+    el.map.addEventListener('mousedown', onDown);
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
   }
 
   /** 地图镜头跟踪开关：拖动地图自动解除；🎯 按钮恢复跟踪 */
@@ -1786,6 +2051,11 @@
     }
     el.btnStatsClose.addEventListener('click', () => el.maskStats.classList.remove('show'));
     el.maskStats.addEventListener('click', (e) => { if (e.target === el.maskStats) el.maskStats.classList.remove('show'); });
+    bindAreaRepairUi();
+    // 手动暂停/继续：用户的意图优先，清掉断网自动暂停标记（避免联网后又被自动恢复）
+    if (el.btnPause) {
+      el.btnPause.addEventListener('click', () => { state.autoPausedByNet = false; hideNetBanner(); });
+    }
     // 轨迹整备：两步确认（会改写历史轨迹的形状与路名，统计不变）
     if (el.btnSnapTrack) {
       let snapArmed = false, snapTimer = null;

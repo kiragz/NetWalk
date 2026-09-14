@@ -181,6 +181,45 @@ const shown = (id) => $(id).classList.contains('show');
   const lastPt = FAKE_TRACK[FAKE_TRACK.length - 1];
   ok('从上次结束位置继续（日志可见）', $('logList').textContent.indexOf('从上次结束位置继续') >= 0);
 
+  // C-1：断网自动暂停 / 联网自动继续（0.9.19）
+  console.log('\n== C-1. 断网自动暂停 ==');
+  ok('btnPause 初始为「暂停」', $('btnPause').textContent === '暂停', $('btnPause').textContent);
+  win.dispatchEvent(new win.Event('offline'));
+  await sleep(120);
+  ok('断网后自动暂停（按钮变「继续」）', $('btnPause').textContent === '继续', $('btnPause').textContent);
+  ok('断网提示条出现', $('netBanner').classList.contains('show'));
+  ok('日志说明断网暂停原因', $('logList').textContent.indexOf('已自动暂停漫游') >= 0);
+  win.dispatchEvent(new win.Event('online'));
+  await sleep(120);
+  ok('联网后自动继续（按钮回到「暂停」）', $('btnPause').textContent === '暂停', $('btnPause').textContent);
+  ok('联网后提示条隐藏', !$('netBanner').classList.contains('show'));
+
+  // C-2：区域修复（框选 → 只修框内）
+  console.log('\n== C-2. 区域轨迹修复 ==');
+  ok('btnRepairArea 按钮存在', !!$('btnRepairArea'));
+  ok('框选矩形 + 确认条元素存在', !!$('pickBox') && !!$('repairBar') && !!$('repairInfo'));
+  ok('NetWalkRepairUtil 已导出', !!(win.NetWalkRepairUtil && win.NetWalkRepairUtil.splitByDistance));
+  const RU = win.NetWalkRepairUtil;
+  const segs = RU.splitByDistance([
+    { lat: 22.5, lng: 114.0 }, { lat: 22.5, lng: 114.004 }, { lat: 22.5, lng: 114.008 },
+    { lat: 22.5, lng: 114.012 }, { lat: 22.5, lng: 114.016 },
+  ], 500);
+  ok('splitByDistance 按距离分段（约 400m/段）', segs.length >= 2, 'segs=' + segs.length);
+  ok('分段连续（相邻段共享边界点）', segs[0][segs[0].length - 1].lng === segs[1][0].lng);
+  const B = { minLat: 22.0, maxLat: 23.0, minLng: 113.5, maxLng: 114.5 };
+  ok('insideBounds 命中框内点', RU.insideBounds({ lat: 22.5, lng: 114.0 }, B) === true);
+  ok('insideBounds 排除框外点', RU.insideBounds({ lat: 31.2, lng: 121.5 }, B) === false);
+  const cnt = RU.countInBounds([{ date: '2026-09-12', path: FAKE_TRACK }], B);
+  ok('countInBounds 统计框内点数/段数', cnt.pts > 0 && cnt.runs >= 1 && cnt.dayN === 1, JSON.stringify(cnt));
+  // 演练模式（jsdom 无高德 Key）点按钮 → 给出提示、不进入框选
+  $('btnRepairArea').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(80);
+  ok('演练模式下点区域修复给出提示且不进入框选',
+    $('logList').textContent.indexOf('区域修复需要高德模式') >= 0 && !doc.body.classList.contains('picking'));
+  $('btnRepairCancel').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(40);
+  ok('取消后仍处于非框选状态', !doc.body.classList.contains('picking'));
+
   // 成就墙
   console.log('\n== D. 成就墙 ==');
   $('btnAch').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));

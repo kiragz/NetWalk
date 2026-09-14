@@ -479,3 +479,51 @@ html, body {
 }
 #btnFollow:hover { background: rgba(30, 40, 66, 0.95); color: #fff; }
 #btnFollow.on { color: #3ddc97; border-color: #3ddc97; box-shadow: 0 0 10px rgba(61, 220, 151, 0.35); }
+/* 断网自动暂停提示条 */
+.net-banner {
+  position: fixed;
+  top: 64px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 300;
+  display: none;
+  padding: 8px 16px;
+  border-radius: 20px;
+  background: rgba(120, 60, 20, 0.92);
+  border: 1px solid #d98b3a;
+  color: #ffd9a8;
+  font-size: 13px;
+  box-shadow: 0 4px 16px rgba(0,0,0,0.45);
+}
+.net-banner.show { display: block; }
+
+/* 区域修复：框选矩形 + 确认条 */
+.pick-box {
+  position: fixed;
+  display: none;
+  z-index: 280;
+  border: 1.5px dashed #3ddc97;
+  background: rgba(61, 220, 151, 0.14);
+  pointer-events: none;
+}
+.pick-box.show { display: block; }
+.repair-bar {
+  position: fixed;
+  bottom: 26px;
+  left: 50%;
+  transform: translateX(-50%);
+  z-index: 300;
+  display: none;
+  align-items: center;
+  gap: 10px;
+  padding: 10px 16px;
+  border-radius: 12px;
+  background: rgba(10, 15, 26, 0.95);
+  border: 1px solid var(--line, #2a3550);
+  box-shadow: 0 6px 24px rgba(0,0,0,0.5);
+  font-size: 13px;
+}
+.repair-bar.show { display: flex; }
+#repairInfo { color: var(--txt, #e6ebf5); margin-right: 4px; }
+body.picking { cursor: crosshair; }
+body.picking #map { cursor: crosshair; }
