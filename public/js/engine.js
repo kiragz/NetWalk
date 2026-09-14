@@ -119,7 +119,7 @@
       this._lastSample = Date.now();
       this._lastPoint = Object.assign({}, this.pos);
       this.provider.moveTo(this.pos.lat, this.pos.lng, this.bearing);
-      this.provider.addTrackPoint(this.pos.lat, this.pos.lng, null, this.speedKmh);
+      this.provider.addTrackPoint(this.pos.lat, this.pos.lng, null, this.speedKmh, this.road);
       await this._planNext(true);
       this._ticker = setInterval(() => this._tick(), TICK_MS);
       this.onLog('出发，开始今天的漫游');
@@ -219,7 +219,7 @@
           });
           // 顺序不能反：先用旧的 _lastPoint 画「上一点 → 当前点」，再更新 _lastPoint
           // （以前先更新再传参，画出来是零长度线段，行走中的轨迹根本不会实时生长）
-          this.provider.addTrackPoint(this.pos.lat, this.pos.lng, this._lastPoint, this.speedKmh);
+          this.provider.addTrackPoint(this.pos.lat, this.pos.lng, this._lastPoint, this.speedKmh, this.road);
           this._lastPoint = Object.assign({}, this.pos);
         }
       }

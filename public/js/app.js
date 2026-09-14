@@ -113,6 +113,9 @@
     ws: null,
     started: false,
     autoPausedByNet: false,   // 断网自动暂停标记（恢复联网后自动继续）
+    roadVisits: {},           // 路段 → 走过次数（重叠热力着色）
+    sessionRuns: {},          // 本次行走中各路段已走完的遍数
+    lastRoadKey: '',          // 当前所在路段（用于统计本次行走的遍数）
     netAvailable: false,
     keyMode: 'none',
     channel: ('BroadcastChannel' in window) ? new BroadcastChannel('netwalk') : null,
@@ -561,7 +564,7 @@
     bindUi();
     initNetWatch();
     // 供测试/外部调用的纯函数（区域修复的分段与判定逻辑）
-    window.NetWalkRepairUtil = { splitByDistance, insideBounds, countInBounds };
+    window.NetWalkRepairUtil = { splitByDistance, insideBounds, countInBounds, segKey, buildRoadVisits, overlapCount, nextPieceIndex };
     bindProfileUi();
     setupLocalKeyFallback();
     checkProfile();
@@ -839,6 +842,10 @@
     const resume = await findLastPosition();
 
     const origin = resume || state.origin;
+    // 实时重叠着色：历史遍数 + 本次行走已走完的遍数 + 当前这一遍
+    state.sessionRuns = {};
+    state.lastRoadKey = '';
+    if (state.provider.setVisitLookup) state.provider.setVisitLookup(visitCountLive);
     const engine = new window.RoamEngine({
       provider: state.provider,
       cfg: state.cfg.speed,
@@ -930,13 +937,18 @@
       const r = await fetch('/api/track/range?from=0000-01-01&to=' + today()).then((x) => x.json());
       const days = (r && r.days) || [];
       const flat = days.flatMap((d) => d.path || []);
+      // 重叠统计要在绘制之前算好：同一条路走过 ≥2 次用热力色（青/绿/紫/洋红）
+      state.roadVisits = buildRoadVisits(days);
+      if (state.provider.setVisitLookup) state.provider.setVisitLookup(visitCountHistory);
       if (flat.length < 2) { log('地图上还没有历史轨迹，本次行走将开始画线'); }
       else {
         const segs = splitTrackSegments(flat, (r && r.starts) || []);
         segs.forEach((seg, idx) => {
           state.provider.setTrack(seg, { append: idx > 0 });
         });
+        const ov = overlapCount(state.roadVisits);
         log(`已把历史轨迹画上地图：${days.length} 天、${flat.length} 个点、${segs.length} 段连续轨迹（已剔除跨设备/跨会话飞线）`);
+        if (ov) log(`🔁 其中 ${ov} 个路段走过 2 次以上，已按重叠次数着色：2 次=青 3 次=绿 4 次=紫 5 次以上=洋红`);
       }
       for (const st of (r && r.starts) || []) {
         if (state.provider.addStartMarker) state.provider.addStartMarker(st.lat, st.lng, st.n);
@@ -944,105 +956,48 @@
     } catch (_) { /* 离线时忽略，不影响行走 */ }
   }
 
-  // ---------- 轨迹整备：把历史轨迹吸附到真实道路上 ----------
-  /** 按空间/时间间断与累计长度把一天的路迹切成若干段（每段 ≤ ~400m，用于逐段重新规划） */
-  function splitTrackChunks(path) {
-    const chunks = [];
-    let cur = [path[0]];
-    let acc = 0;
-    for (let i = 1; i < path.length; i++) {
-      const a = path[i - 1], b = path[i];
-      const m = haversineKm(a, b);
-      acc += m;
-      // 时间断档 > 15 分钟或空间跳变 > 250m 视为两段；累计超过 400m 也切开（保证每段规划便宜且贴路）
-      if (m > 250 || (b.t - a.t) > 15 * 60000 || acc > 400) {
-        chunks.push(cur); cur = [b]; acc = 0;
-      } else cur.push(b);
-    }
-    if (cur.length) chunks.push(cur);
-    return chunks;
+  // ---------- 重叠热力：同一条路走过几次 ----------
+  /** 路段标识：有路名用路名；没路名用 ~11m 网格坐标做近似键 */
+  function segKey(p) {
+    const road = String((p && p.road) || '').trim();
+    if (road) return road;
+    if (!Number.isFinite(p && p.lat) || !Number.isFinite(p && p.lng)) return '';
+    return '#' + p.lat.toFixed(4) + ',' + p.lng.toFixed(4);
   }
 
-  /** 用重新规划出的路线替换一段轨迹：时间按距离比例重排，路名按步骤里程映射重算 */
-  function retimeChunk(route, ch) {
-    const pts = route.points;
-    const t0 = ch[0].t, t1 = ch[ch.length - 1].t || t0 + 60000;
-    const cum = [0];
-    for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + haversineKm(pts[i - 1], pts[i]));
-    const total = cum[cum.length - 1] || 1;
-    const steps = route.steps || [];
-    const stepSum = steps.reduce((s, x) => s + (x.distance || 0), 0);
-    const k = stepSum > 0 ? total / stepSum : 1;
-    const roadAt = (d) => {
-      let acc = 0;
-      for (const st of steps) {
-        acc += (st.distance || 0) * k;
-        if (d <= acc) return st.road || '';
+  /** 统计每个路段走过的次数：同一天内连续同名路段算 1 遍，跨天/跨会话累加 */
+  function buildRoadVisits(days) {
+    const visits = {};
+    for (const day of days) {
+      const path = (day && day.path) || [];
+      let prevKey = null;
+      for (const p of path) {
+        const key = segKey(p);
+        if (!key) { prevKey = null; continue; }
+        if (key !== prevKey) visits[key] = (visits[key] || 0) + 1;   // 新的一次经过
+        prevKey = key;
       }
-      return steps.length ? (steps[steps.length - 1].road || '') : '';
-    };
-    const durSec = Math.max(1, (t1 - t0) / 1000);
-    const spd = Math.round(((total / durSec) * 3.6) * 10) / 10;
-    const mode = ch[0].mode || 'walk';
-    const no = Number(ch[0].no) || 0;   // 整备后的点沿用原会话号（绘制切分依赖它）
-    return pts.map((p, i) => ({
-      t: Math.round(t0 + (cum[i] / total) * (t1 - t0)),
-      lat: p.lat, lng: p.lng,
-      road: roadAt(cum[i]) || (ch[0].road || ''),
-      spd, mode,
-      no,
-      straight: 0,   // 整备后的点都贴路，不再是直线兜底
-    }));
+    }
+    return visits;
   }
 
-  /** 轨迹整备主流程：逐天逐段重新沿真实道路规划，替换后形状全部贴路、路名重算 */
-  async function snapTrackToRoads(btn) {
-    if (!state.provider || state.provider.name !== 'amap') {
-      log('⚠ 轨迹整备需要高德模式（在线）；演练模式没有真实路网可吸附。');
-      return;
-    }
-    const old = btn.textContent;
-    btn.disabled = true;
-    let daysDone = 0, segSnap = 0, segKeep = 0, calls = 0;
-    try {
-      const r = await fetch('/api/track/range?from=0000-01-01&to=' + today()).then((x) => x.json());
-      const days = (r && r.days) || [];
-      for (const day of days) {
-        const path = day.path || [];
-        if (path.length < 2) continue;
-        const chunks = splitTrackChunks(path);
-        const newPts = [];
-        let changed = false;
-        for (const ch of chunks) {
-          if (ch.length < 2) { newPts.push(...ch); continue; }
-          const a = ch[0], b = ch[ch.length - 1];
-          const route = await state.provider.planRoute({ lat: a.lat, lng: a.lng }, { lat: b.lat, lng: b.lng });
-          if (!route || !route.points || route.points.length < 2) {
-            newPts.push(...ch); segKeep++;
-            continue;
-          }
-          newPts.push(...retimeChunk(route, ch));
-          segSnap++; changed = true;
-        }
-        calls += chunks.length;
-        btn.textContent = `整备中 ${daysDone + 1}/${days.length} 天`;
-        if (!changed) continue;
-        const w = await fetch('/api/track/rewrite', {
-          method: 'POST', headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ date: day.date, points: newPts }),
-        }).then((x) => x.json());
-        if (w.ok) daysDone++;
-      }
-      log(`🧭 轨迹整备完成：${daysDone} 天已更新，${segSnap} 段吸附到道路（${segKeep} 段规划失败保留原样，共 ${calls} 次规划）`);
-      log('地图上的历史轨迹已全部落在真实道路上；里程/时长/成就等统计不受影响。');
-      drawHistoryOnMap(state.origin);
-    } catch (e) {
-      log('轨迹整备失败：' + (e && e.message ? e.message : e));
-    } finally {
-      btn.disabled = false; btn.textContent = old;
-    }
+  /** 历史绘制用：该路段在存档里走过几次 */
+  function visitCountHistory(key) { return (state.roadVisits && state.roadVisits[key]) || 0; }
+
+  /** 实时绘制用：历史遍数 + 本次行走已走完的遍数 + 当前这一遍 */
+  function visitCountLive(key) {
+    if (!key) return 0;
+    const h = (state.roadVisits && state.roadVisits[key]) || 0;
+    const s2 = (state.sessionRuns && state.sessionRuns[key]) || 0;
+    return h + s2 + 1;
   }
 
+  /** 重叠路段的条数（用于日志提示） */
+  function overlapCount(visits) {
+    let n = 0;
+    for (const k in visits) if (visits[k] >= 2) n++;
+    return n;
+  }
   // ------------------------------------------------------------------
   // 断网自动暂停：离线时引擎无法规划路线，会退化成"直线兜底"走出不贴路的轨迹，
   // 所以断网立即暂停；恢复联网后自动继续（手动暂停过则不自动恢复）
@@ -1100,7 +1055,7 @@
     for (let i = 0; i < pts.length; i++) {
       cur.push(pts[i]);
       if (cur.length >= 2 && i < pts.length - 1) {
-        const d = haversineKm(cur[0], cur[cur.length - 1]) * 1000;
+        const d = haversineKm(cur[0], cur[cur.length - 1]);
         if (d >= maxM) { out.push(cur); cur = [pts[i]]; }
       }
     }
@@ -1111,6 +1066,50 @@
   function insideBounds(p, b) {
     return p.lat >= b.minLat && p.lat <= b.maxLat && p.lng >= b.minLng && p.lng <= b.maxLng;
   }
+
+  /** 修复分段：从 i 出发按累计 ~stepM 米找本段终点下标（终点必定是原始轨迹点，保证修复后仍贴用户走向） */
+  function nextPieceIndex(run, i, stepM) {
+    let j = i + 1, acc = 0;
+    while (j < run.length - 1) {
+      acc += haversineKm(run[j - 1], run[j]);
+      if (acc >= stepM) break;
+      j++;
+    }
+    return j;
+  }
+
+  /** 用重新规划出的路线替换一段轨迹：时间按距离比例重排，路名按步骤里程映射重算 */
+  function retimeChunk(route, ch) {
+    const pts = route.points;
+    const t0 = ch[0].t, t1 = ch[ch.length - 1].t || t0 + 60000;
+    const cum = [0];
+    for (let i = 1; i < pts.length; i++) cum.push(cum[i - 1] + haversineKm(pts[i - 1], pts[i]));
+    const total = cum[cum.length - 1] || 1;
+    const steps = route.steps || [];
+    const stepSum = steps.reduce((s2, x) => s2 + (x.distance || 0), 0);
+    const k = stepSum > 0 ? total / stepSum : 1;
+    const roadAt = (d) => {
+      let acc = 0;
+      for (const st of steps) {
+        acc += (st.distance || 0) * k;
+        if (d <= acc) return st.road || '';
+      }
+      return steps.length ? (steps[steps.length - 1].road || '') : '';
+    };
+    const durSec = Math.max(1, (t1 - t0) / 1000);
+    const spd = Math.round(((total / durSec) * 3.6) * 10) / 10;
+    const mode = ch[0].mode || 'walk';
+    const no = Number(ch[0].no) || 0;   // 修复后的点沿用原会话号（绘制切分依赖它）
+    return pts.map((p, i) => ({
+      t: Math.round(t0 + (cum[i] / total) * (t1 - t0)),
+      lat: p.lat, lng: p.lng,
+      road: roadAt(cum[i]) || (ch[0].road || ''),
+      spd, mode,
+      no,
+      straight: 0,   // 修复后的点都贴路，不再是直线兜底
+    }));
+  }
+
 
   /** 统计框内点数/段数/涉及天数（用于确认条提示，不写盘） */
   function countInBounds(days, b) {
@@ -1133,10 +1132,48 @@
     return (r && r.days) || [];
   }
 
-  /** 区域修复主流程：只替换落在框内的连续段，框外原样保留 */
+  /**
+   * 区域修复主流程：只替换落在框内的连续段，框外原样保留。
+   * 关键：规划端点取「原始轨迹点」，按 ~200m 一段逐段规划后拼接 ——
+   * ① 每段规划距离短、成功率高（以前整条一次规划，长距离容易失败或被绕远）
+   * ② 端点锚定在原走向上，修复后仍贴合用户真实路径，不会跑到别的路上
+   * ③ 失败的段保留原样（宁可不动，也不写坏数据），并如实汇报段数
+   */
   async function repairArea(bounds) {
     const days = await loadAllDays();
     let daysFixed = 0, segOK = 0, segKeep = 0, ptsIn = 0;
+    const planOne = async (a, b) => {
+      try {
+        const r = await Promise.race([
+          state.provider.planRoute({ lat: a.lat, lng: a.lng }, { lat: b.lat, lng: b.lng }),
+          new Promise((res) => setTimeout(() => res(null), 8000)),
+        ]);
+        return (r && r.points && r.points.length >= 2) ? r : null;
+      } catch (_) { return null; }
+    };
+    /** 把框内的一段轨迹重新沿道路规划（端点锚定原轨迹点） */
+    const repairRun = async (run, emit) => {
+      ptsIn += run.length;
+      const STEP_M = 200;          // 每 ~200m 一个规划单元
+      let i = 0;
+      let first = true;
+      while (i < run.length - 1) {
+        const j = nextPieceIndex(run, i, STEP_M);
+        const route = await planOne(run[i], run[j]);
+        if (route) {
+          const mapped = retimeChunk(route, run.slice(i, j + 1));
+          emit(first ? mapped : mapped.slice(1));   // 首点与上一段共享，避免重复
+          segOK++;
+        } else {
+          emit(first ? run.slice(i, j) : run.slice(i, j));   // 保留原样（不含端点 j，归下一段）
+          segKeep++;
+        }
+        first = false;
+        i = j;
+      }
+      if (run.length >= 2) emit([run[run.length - 1]]);   // 段尾点
+    };
+
     for (const day of days) {
       const path = day.path || [];
       if (path.length < 2) continue;
@@ -1148,24 +1185,9 @@
         let j = i;
         while (j < path.length && insideBounds(path[j], bounds)) j++;
         const run = path.slice(i, j);
-        ptsIn += run.length;
-        for (const pc of splitByDistance(run, 500)) {
-          if (pc.length < 2) { out.push(...pc); continue; }
-          const a = pc[0], b = pc[pc.length - 1];
-          let route = null;
-          try {
-            route = await Promise.race([
-              state.provider.planRoute({ lat: a.lat, lng: a.lng }, { lat: b.lat, lng: b.lng }),
-              new Promise((res) => setTimeout(() => res(null), 8000)),
-            ]);
-          } catch (_) { route = null; }
-          if (route && route.points && route.points.length >= 2) {
-            out.push(...retimeChunk(route, pc));
-            segOK++; changed = true;
-          } else {
-            out.push(...pc); segKeep++;
-          }
-        }
+        const before = segOK;
+        await repairRun(run, (pts) => { out.push(...pts); });
+        if (segOK > before) changed = true;
         i = j;
       }
       if (!changed) continue;
@@ -1304,6 +1326,13 @@
   }
 
   function onEngineUpdate(s) {
+    // 记录本次行走走过的路段遍数（用于重叠热力着色：再走一遍就变热色）
+    if (s.road && s.road !== state.lastRoadKey) {
+      if (state.lastRoadKey) {
+        state.sessionRuns[state.lastRoadKey] = (state.sessionRuns[state.lastRoadKey] || 0) + 1;
+      }
+      state.lastRoadKey = s.road;
+    }
     const modes = window.NetWalkSpeed.MODES;
     const m = modes[s.mode] || modes.walk;
     el.speed.innerHTML = `${s.speedKmh.toFixed(1)}<small>km/h</small>`;    el.mode.textContent = `${m.icon} ${m.label}`;
@@ -2056,24 +2085,7 @@
     if (el.btnPause) {
       el.btnPause.addEventListener('click', () => { state.autoPausedByNet = false; hideNetBanner(); });
     }
-    // 轨迹整备：两步确认（会改写历史轨迹的形状与路名，统计不变）
-    if (el.btnSnapTrack) {
-      let snapArmed = false, snapTimer = null;
-      el.btnSnapTrack.addEventListener('click', async () => {
-        const btn = el.btnSnapTrack;
-        if (!snapArmed) {
-          snapArmed = true;
-          btn.textContent = '再点一次确认整备';
-          log('🧭 轨迹整备将按约 400 米分段重新沿真实道路规划历史轨迹（统计不变）。建议先「💾 存档」留一份备份。再点一次执行。');
-          clearTimeout(snapTimer);
-          snapTimer = setTimeout(() => { snapArmed = false; btn.textContent = '🧭 轨迹整备'; }, 8000);
-          return;
-        }
-        snapArmed = false;
-        clearTimeout(snapTimer);
-        await snapTrackToRoads(btn);
-      });
-    }
+    // 注：全局「轨迹整备」已移除（会把小路整成直线）——改用「🩹 区域修复」按需修复
     el.statsTabs.addEventListener('click', (e) => {
       const btn = e.target.closest && e.target.closest('.ach-tab');
       if (!btn) return;

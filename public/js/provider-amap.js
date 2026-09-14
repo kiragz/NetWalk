@@ -133,7 +133,8 @@
       // 这就是"直线飞线"的真正来源（数据再干净也拦不住，因为它发生在绘制层）。
       // 现改为"笔迹"模型：连续的同色相邻点共用一条 Polyline（一条 run），
       // 遇到断笔（换会话/跳变/断档/直线剔除）就换新 Polyline，段与段之间绝不相连。
-      this._speedColors = speedGradientPalette();
+      this._speedColors = speedGradientPalette().concat(HEAT_COLORS);
+      this._visitLookup = null;   // 路段重叠次数查询（由 app 注入）：返回该路段走过的总次数
       this._runs = [];       // 所有已创建的笔迹（清空轨迹时统一移除）
       this._curRun = {};     // 速度档 → 当前笔迹
       this._trackPts = [];
@@ -186,10 +187,25 @@
       return Math.floor(t * 10);
     }
 
-    addTrackPoint(lat, lng, prev, spd) {
+    /** 设置「路段重叠次数」查询函数（返回该路段已走过的次数），用于重叠热力着色 */
+    setVisitLookup(fn) { this._visitLookup = typeof fn === 'function' ? fn : null; }
+
+    /** 热力色索引：重叠 ≥2 次时返回热力色下标，否则 -1（用速度色） */
+    _heatIndex(key) {
+      const n = (key && this._visitLookup) ? Number(this._visitLookup(key)) || 0 : 0;
+      if (n < 2) return -1;
+      const base = this._speedColors.length - HEAT_COLORS.length;
+      if (n >= 5) return base + 3;
+      if (n === 4) return base + 2;
+      if (n === 3) return base + 1;
+      return base;   // 2 次
+    }
+
+    addTrackPoint(lat, lng, prev, spd, roadKey) {
       if (!this._ready) return;
       const cur = new this.AMap.LngLat(lng, lat);
-      const li = this.speedColorIndex(spd);
+      const hi = this._heatIndex(roadKey);
+      const li = hi >= 0 ? hi : this.speedColorIndex(spd);   // 重叠路段用热力色覆盖速度色
       if (prev) {
         // 每段按速度独立上色：段 = [上一点, 当前点]，交界处两点重叠补缝。
         // 线段写进「当前笔迹」——同一笔迹内的相邻点才相连。
@@ -237,7 +253,7 @@
         this._curRun = {};
       }
       for (let i = 1; i < points.length; i++) {
-        this.addTrackPoint(points[i].lat, points[i].lng, points[i - 1], points[i].spd);
+        this.addTrackPoint(points[i].lat, points[i].lng, points[i - 1], points[i].spd, points[i].road);
       }
     }
 
@@ -455,9 +471,14 @@
   global.AmapProvider = AmapProvider;
 })(window);
 
+/**
+ * 重叠热力色（按走过次数）：2 次 → 青，3 次 → 绿，4 次 → 紫，5 次及以上 → 洋红。
+ * 刻意避开速度色系（黄→橙→红），保证「重叠」和「速度快慢」一眼能区分。
+ */
+const HEAT_COLORS = ['#3ad9ff', '#3ddc97', '#a97bff', '#ff5cc8'];
+
 /** 速度渐变 10 档调色板：浅黄 → 橙 → 深红（与弹窗/日报同一套插值） */
-function speedGradientPalette() {
-  const mix = (x, y, k) => Math.round(x + (y - x) * k);
+function speedGradientPalette() {  const mix = (x, y, k) => Math.round(x + (y - x) * k);
   const colors = [];
   for (let i = 0; i < 10; i++) {
     const t = i / 9;

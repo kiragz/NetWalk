@@ -220,6 +220,45 @@ const shown = (id) => $(id).classList.contains('show');
   await sleep(40);
   ok('取消后仍处于非框选状态', !doc.body.classList.contains('picking'));
 
+  // C-3：重叠热力着色 + 修复分段（0.9.20）
+  console.log('\n== C-3. 重叠按次数着色 ==');
+  ok('全局「轨迹整备」按钮已移除', !doc.getElementById('btnSnapTrack'));
+  ok('热力统计工具已导出', !!(RU.buildRoadVisits && RU.segKey && RU.nextPieceIndex));
+  const days2 = [
+    { date: '2026-09-13', path: [
+      { lat: 22.5, lng: 114.0, road: '解放北路' }, { lat: 22.501, lng: 114.0, road: '解放北路' },
+      { lat: 22.502, lng: 114.0, road: '中山五路' },
+    ] },
+    { date: '2026-09-14', path: [
+      { lat: 22.5, lng: 114.0, road: '解放北路' }, { lat: 22.501, lng: 114.0, road: '解放北路' },
+      { lat: 22.502, lng: 114.0, road: '中山五路' }, { lat: 22.503, lng: 114.0, road: '中山五路' },
+    ] },
+  ];
+  const visits = RU.buildRoadVisits(days2);
+  ok('同一路段跨天累加次数（解放北路=2）', visits['解放北路'] === 2, JSON.stringify(visits));
+  ok('同一天内连续同名只算 1 遍（中山五路=2）', visits['中山五路'] === 2, String(visits['中山五路']));
+  ok('重叠路段计数（overlapCount>=2）', RU.overlapCount(visits) === 2, String(RU.overlapCount(visits)));
+  ok('无路名时用网格键兜底', RU.segKey({ lat: 22.5, lng: 114.0, road: '' }).indexOf('#') === 0);
+  const Dp = win.DrillProvider;
+  if (Dp) {
+    const dp = new Dp({});
+    dp.setVisitLookup((k) => ({ 热路: 4 })[k] || 0);
+    ok('重叠 4 次 → 热力色下标 12', dp._heatIndex('热路') === 12, String(dp._heatIndex('热路')));
+    ok('只走过 1 次 → 不触发热力色（-1）', dp._heatIndex('新路') === -1, String(dp._heatIndex('新路')));
+    ok('无查询函数时安全返回 -1', (() => { const d2 = new Dp({}); return d2._heatIndex('任意') === -1; })());
+    ok('演练图已扩展 4 条热力色轨迹层（dTrack10..13）',
+      ['10', '11', '12', '13'].every((i) => doc.getElementById('dTrack' + i)));
+  } else { ok('DrillProvider 可访问（跳过热力色断言）', false, 'window.DrillProvider 缺失'); }
+  // 修复分段：每段 ~200m 且端点取原始点
+  const mkRun = (n, stepDeg) => Array.from({ length: n }, (_, i) => ({ lat: 22.5, lng: 114.0 + i * stepDeg, road: '某路' }));
+  const run500 = mkRun(11, 0.0005);   // 每步 ~51m，共 ~510m
+  const j1 = RU.nextPieceIndex(run500, 0, 200);
+  ok('修复分段终点落在 ~200m 处（4 步 ≈ 205m）', j1 === 4, 'j=' + j1 + ' len=' + run500.length + ' fn=' + String(RU.nextPieceIndex).slice(0, 90));
+  const j2 = RU.nextPieceIndex(run500, j1, 200);
+  ok('第二段继续推进且不越界', j2 > j1 && j2 < run500.length, 'j1=' + j1 + ' j2=' + j2 + ' len=' + run500.length);
+  const j3 = RU.nextPieceIndex(mkRun(3, 0.0005), 0, 200);
+  ok('长段一次走完（<200m 直接到末点）', j3 === 2, String(j3) + ' fn=' + String(RU.nextPieceIndex).slice(0, 90));
+
   // 成就墙
   console.log('\n== D. 成就墙 ==');
   $('btnAch').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));

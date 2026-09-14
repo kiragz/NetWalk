@@ -154,6 +154,10 @@
           <path id="dTrack7" fill="none" stroke="rgb(238,76,44)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" opacity="0.95"/>
           <path id="dTrack8" fill="none" stroke="rgb(231,54,38)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" opacity="0.95"/>
           <path id="dTrack9" fill="none" stroke="rgb(224,32,32)" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" opacity="0.95"/>
+          <path id="dTrack10" fill="none" stroke="#3ad9ff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" opacity="0.95"/>
+          <path id="dTrack11" fill="none" stroke="#3ddc97" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" opacity="0.95"/>
+          <path id="dTrack12" fill="none" stroke="#a97bff" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" opacity="0.95"/>
+          <path id="dTrack13" fill="none" stroke="#ff5cc8" stroke-width="3" stroke-linecap="round" stroke-linejoin="round" opacity="0.95"/>
         </g>
         <g id="dAvatar"></g>
         <g id="dLabels"></g>
@@ -224,7 +228,20 @@
       return Math.floor(t * 10);
     }
 
-    addTrackPoint(lat, lng, prev, spd) {
+    /** 设置「路段重叠次数」查询函数（返回该路段走过的总次数） */
+    setVisitLookup(fn) { this._visitLookup = typeof fn === 'function' ? fn : null; }
+
+    /** 热力色下标：重叠 >=2 次用 dTrack10..13（青/绿/紫/洋红），否则 -1（用速度色） */
+    _heatIndex(key) {
+      const n = (key && this._visitLookup) ? Number(this._visitLookup(key)) || 0 : 0;
+      if (n < 2) return -1;
+      if (n >= 5) return 13;
+      if (n === 4) return 12;
+      if (n === 3) return 11;
+      return 10;
+    }
+
+    addTrackPoint(lat, lng, prev, spd, roadKey) {
       if (!this.trackEl) return;
       const w = this.toWorld(lat, lng);
       const x = (w.x * this.ppm).toFixed(1);
@@ -234,7 +251,8 @@
         const pw = this.toWorld(prev.lat, prev.lng);
         const px = (pw.x * this.ppm).toFixed(1);
         const py = (pw.y * this.ppm).toFixed(1);
-        const li = this.speedColorIndex(spd);
+        const hi = this._heatIndex(roadKey);
+        const li = hi >= 0 ? hi : this.speedColorIndex(spd);
         const lo = this.speedColorIndex(this._lastSpd != null ? this._lastSpd : spd);
         for (let k = Math.min(li, lo); k <= Math.max(li, lo); k++) {
           const el = this.svg.querySelector('#dTrack' + k);
@@ -245,7 +263,7 @@
       this._trackCount++;
       if (this._trackCount > 6000) {
         // 轨迹过长时截断，避免 DOM 无限膨胀（各色 path 只保留最近 4000 段）
-        for (let k = 0; k < 10; k++) {
+        for (let k = 0; k < 14; k++) {
           const el = this.svg.querySelector('#dTrack' + k);
           if (!el) continue;
           const parts = (el.getAttribute('d') || '').split(' M').filter(Boolean);
@@ -276,7 +294,7 @@
       if (!append) {
         this.clearStartMarkers();
         this._trackCount = 0;
-        for (let k = 0; k < 10; k++) {
+        for (let k = 0; k < 14; k++) {
           const el = this.svg.querySelector('#dTrack' + k);
           if (el) el.setAttribute('d', '');
         }
@@ -285,7 +303,7 @@
       }
       // append=true：追加新的一段（不断笔也绝不与上一段相连 —— 每对点都是独立的 M+L 子路径）
       for (let i = 1; i < (points || []).length; i++) {
-        this.addTrackPoint(points[i].lat, points[i].lng, points[i - 1], points[i].spd);
+        this.addTrackPoint(points[i].lat, points[i].lng, points[i - 1], points[i].spd, points[i].road);
       }
     }
 
