@@ -219,6 +219,9 @@
           if (this._runs.length > 2400) {
             const dropped = this._runs.splice(0, 600);
             for (const old of dropped) { try { this.map.remove(old); } catch (_) { /* noop */ } }
+            // ⚠ 必须清掉指向已移除笔迹的引用：否则后续的点会追加进一条已经不在地图上的线里，
+            // 表现为"长距离漫游到一定长度后轨迹突然断掉/消失"
+            this._curRun = {};
           }
         } else {
           line.setPath(line.getPath().concat(seg));
@@ -238,7 +241,6 @@
         this._runs = [];
         this._trackPts = [];
         this._lastSpd = null;
-        this._lastIdx = null;
       } else {
         // 追加新的一段：先"断笔"——关闭当前所有笔迹，
         // 下一段从新 Polyline 开始，绝不从上一段的末点连一条直线过来（飞线根源）

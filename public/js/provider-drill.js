@@ -280,7 +280,6 @@
           if (el) el.setAttribute('d', '');
         }
         this._lastSpd = null;
-        this._lastIdx = null;
         if (this.trackEl) this.trackEl.setAttribute('d', '');
       }
       // append=true：追加新的一段（不断笔也绝不与上一段相连 —— 每对点都是独立的 M+L 子路径）

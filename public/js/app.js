@@ -177,6 +177,37 @@
     return name.slice(0, 3) + '***' + name.slice(-2) + domain;
   }
 
+  /** 带超时的 GET JSON：邮箱/网络卡住时别把流程一直堵着（返回 null 表示超时或失败） */
+  async function fetchJson(url, ms) {
+    const ctrl = (typeof AbortController === 'function') ? new AbortController() : null;
+    let timer = null;
+    if (ctrl && ms) timer = setTimeout(() => { try { ctrl.abort(); } catch (_) { /* noop */ } }, ms);
+    try {
+      const res = await fetch(url, ctrl ? { signal: ctrl.signal } : undefined);
+      return await res.json();
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
+  /** 带超时的 POST JSON */
+  async function postJson(url, body, ms) {
+    const ctrl = (typeof AbortController === 'function') ? new AbortController() : null;
+    let timer = null;
+    if (ctrl && ms) timer = setTimeout(() => { try { ctrl.abort(); } catch (_) { /* noop */ } }, ms);
+    try {
+      const res = await fetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body || {}),
+        ...(ctrl ? { signal: ctrl.signal } : {}),
+      });
+      return await res.json();
+    } finally {
+      if (timer) clearTimeout(timer);
+    }
+  }
+
   function log(msg) {
     const d = new Date();
     const t = `${String(d.getHours()).padStart(2, '0')}:${String(d.getMinutes()).padStart(2, '0')}:${String(d.getSeconds()).padStart(2, '0')}`;
@@ -820,9 +851,9 @@
         log('已重置：本次不自动从邮箱同步（避免把旧存档拉回来）。需要同步请到「账号与档案」点「一键同步」。');
         return;
       }
-      const r = await fetch('/api/mailbox/pull', { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}' });
-      const j = await r.json();
-      if (j.ok) {
+      // 邮箱拉存档可能很慢（IMAP 握手），加 25 秒上限：超时就按本地数据继续，不耽误出发
+      const j = await postJson('/api/mailbox/pull', {}, 25000);
+      if (j && j.ok) {
         const imp = j.result || {};
         // 同步把高德 Key 也带回来了（新设备原本没有）→ 必须重载才能从虚拟路网切到真实地图
         if (j.keyRestored) {
@@ -862,10 +893,11 @@
       if (localStorage.getItem(SYNC_CHOICE_KEY)) return false;   // 这台机器已经选过（开机自启时不再反复打扰）
     } catch (_) { /* noop */ }
     // 注意：即使 ?autostart=1 开机自启也要问 —— 之前跳过它，导致新机器一开机就直接开走，邮箱里的旧存档没同步，两台机器各走各的
+    // 两个请求都带超时：网络/邮箱卡住时不能把「出发」一直堵着
     try {
-      const st = await fetch('/api/mailbox/status').then((x) => x.json()).catch(() => null);
+      const st = await fetchJson('/api/mailbox/status', 5000);
       if (!st || !st.imapConfigured || !st.hasArchive) return false;
-      const r = await fetch('/api/track/range?from=0000-01-01&to=' + today()).then((x) => x.json()).catch(() => null);
+      const r = await fetchJson('/api/track/range?from=0000-01-01&to=' + today(), 5000);
       const days = (r && r.days) || [];
       const pts = days.reduce((n, d) => n + ((d.path || []).length), 0);
       return pts < 10 || days.length <= 1;    // 本机几乎没数据 / 只有一天 → 很可能是一台新设备
