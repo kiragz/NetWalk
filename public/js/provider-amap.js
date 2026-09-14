@@ -207,44 +207,44 @@
       const hi = this._heatIndex(roadKey, lat, lng);
       const li = hi >= 0 ? hi : this.speedColorIndex(spd);   // 重叠路段用热力色覆盖速度色
       if (prev) {
-        // 每段按速度独立上色：段 = [上一点, 当前点]，交界处两点重叠补缝。
-        // 线段写进「当前笔迹」——同一笔迹内的相邻点才相连。
-        // 用「上一段实际画出的颜色档」判断是否提笔（不能用速度档：热力色参与时会算错）
-        const plo = this._lastIdx != null ? this._lastIdx : li;
-        // ⚠ 速度档变化必须"提笔"（关闭全部当前笔迹再画边界段）：
-        // 否则速度回到旧档时，线段会追加进旧档那条笔迹的末尾，
-        // 把相距很远的两部分连进同一条线 —— 飞线的第二个来源（与换会话无关，纯速度波动就会触发）。
-        if (plo !== li) this._curRun = {};
+        // 关键不变式：一条笔迹（Polyline）里只允许「原始点序上相邻」的线段。
+        // 判据：该笔迹的末点必须恰好等于本段起点（prev）；不等就另起一笔。
+        // 这样换颜色/换速度/换会话都自然提笔，而同一颜色的连续段可以继续追加 ——
+        // 折线对象最少、渲染最稳（之前每换一次色档就提笔，热力色让对象数爆炸，
+        // 地图每秒重绘 → 紫点/面板抽搐闪烁、折线多到渲染丢段 → 严重断线）。
         const seg = [new this.AMap.LngLat(prev.lng, prev.lat), cur];
-        // 速度色之间才做"跨档补缝"；涉及热力色时只画该段自己的颜色，
-        // 否则同一段线会被塞进多个颜色层，画面上看起来像"轨迹断成好几截"
-        const heatBase = this._speedColors.length - HEAT_COLORS.length;
-        const from = (plo < heatBase && li < heatBase) ? Math.min(plo, li) : li;
-        const to = (plo < heatBase && li < heatBase) ? Math.max(plo, li) : li;
-        for (let k = from; k <= to; k++) {
-          let line = this._curRun[k];
-          if (!line) {
-            line = new this.AMap.Polyline({
-              path: [],
-              strokeColor: this._speedColors[k],
-              strokeWeight: 4,
-              strokeOpacity: 0.9,
-              lineJoin: 'round',
-              lineCap: 'round',
-            });
-            this.map.add(line);
-            this._runs.push(line);
-            this._curRun[k] = line;
-          }
-          line.setPath(line.getPath().concat(seg));
+        let line = this._curRun[li];
+        let lastPt = null;
+        if (line) {
+          const path = line.getPath();
+          lastPt = path.length ? path[path.length - 1] : null;
         }
+        const connected = lastPt && Math.abs(lastPt.lng - prev.lng) < 1e-9 && Math.abs(lastPt.lat - prev.lat) < 1e-9;
+        if (!connected) {
+          line = new this.AMap.Polyline({
+            path: [],
+            strokeColor: this._speedColors[li],
+            strokeWeight: 4,
+            strokeOpacity: 0.9,
+            lineJoin: 'round',
+            lineCap: 'round',
+          });
+          this.map.add(line);
+          this._runs.push(line);
+          this._curRun[li] = line;
+          // 笔迹太多会拖垮渲染（闪烁/断线的根源）：超过上限就把最老的段整段移除
+          if (this._runs.length > 2400) {
+            const dropped = this._runs.splice(0, 600);
+            for (const old of dropped) { try { this.map.remove(old); } catch (_) { /* noop */ } }
+          }
+        }
+        line.setPath(line.getPath().concat(seg));
       }
       this._lastSpd = spd;
       this._lastIdx = li;
       this._trackPts.push(cur);
       if (this._trackPts.length > 5000) this._trackPts = this._trackPts.slice(-4000);
     }
-
     setTrack(points, { append = false } = {}) {
       if (!this._ready) return;
       if (!append) {

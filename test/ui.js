@@ -620,9 +620,9 @@ const shown = (id) => $(id).classList.contains('show');
 
   ap.addTrackPoint(22.55, 114.07, null, 2);          // 慢速 → 浅黄档（档 1）
   ap.addTrackPoint(22.56, 114.08, { lat: 22.55, lng: 114.07 }, 8);   // 快速 → 深色档（档 5）
-  // 0.9.13 笔迹模型：跨档补缝会为档 1..5 各建一条笔迹，每条存 [prev, cur]
-  ok('轨迹按速度写入对应渐变档（跨档补缝各建一条笔迹）',
-    amapSt.speedLines.length === 5 && amapSt.speedLines.every((l) => l.path.length === 2),
+  // v0.9.24 笔迹模型：跨档 = 换新笔迹（不再跨档补缝多画 4 条，避免颜色层堆叠导致闪烁/断线）
+  ok('速度跨档 → 只为新高档建 1 条笔迹（不再跨档补缝多画）',
+    amapSt.speedLines.length === 1 && amapSt.speedLines[0].path.length === 2,
     'runs=' + amapSt.speedLines.length + ' paths=' + JSON.stringify(amapSt.speedLines.map((l) => l.path.length)));
 
   // 飞线回归（核心！）：两段不相邻、同速度档的轨迹，绝不能被同一条 Polyline 连起来
@@ -632,8 +632,8 @@ const shown = (id) => $(id).classList.contains('show');
   ap.setTrack(segA);
   ap.setTrack(segB, { append: true });
   const newRuns = amapSt.speedLines.slice(runsBefore);
-  ok('断笔后新段用新 Polyline（飞线回归：不再从上一段末点直连）',
-    newRuns.length === 1 && newRuns[0].path.length === 2 && newRuns[0].path[0].lng === 2,
+  ok('断笔后新段用新 Polyline（两次 setTrack 各建一条，互不相连）',
+    newRuns.length === 2 && newRuns.every((l) => l.path.length === 2),
     JSON.stringify(newRuns.map((l) => l.path.length)));
 
   // 飞线回归 2：速度跨档来回变化时，回到旧档绝不能追加进旧笔迹
