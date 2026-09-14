@@ -203,8 +203,9 @@
         }
         const connected = lastPt && Math.abs(lastPt.lng - prev.lng) < 1e-9 && Math.abs(lastPt.lat - prev.lat) < 1e-9;
         if (!connected) {
+          // 直接用本段初始化：先给空 path 再 setPath 会让 AMap 每一帧都报 "error Polyline path"
           line = new this.AMap.Polyline({
-            path: [],
+            path: seg,
             strokeColor: this._speedColors[li],
             strokeWeight: 4,
             strokeOpacity: 0.9,
@@ -219,8 +220,9 @@
             const dropped = this._runs.splice(0, 600);
             for (const old of dropped) { try { this.map.remove(old); } catch (_) { /* noop */ } }
           }
+        } else {
+          line.setPath(line.getPath().concat(seg));
         }
-        line.setPath(line.getPath().concat(seg));
       }
       this._lastSpd = spd;
       this._trackPts.push(cur);

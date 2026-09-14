@@ -854,19 +854,21 @@
    * 要不要在出发前问「先同步存档」：
    * 本机没有任何轨迹 + 已配置 IMAP 邮箱 + 不是重置后的免同步状态 + 不是脚本自动出发。
    */
+  const SYNC_CHOICE_KEY = 'netwalkSyncPromptChoice';   // 本机已做过的选择：sync / skip（每台机器只问一次）
   async function shouldPromptSyncFirst() {
     if (state.syncPromptDone) return false;              // 本次会话已经问过/已选择
     if (localStorage.getItem('netwalkNoAutoSync') === '1') return false;   // 刚重置：明确不要再拉旧存档
     try {
-      if (new URLSearchParams(location.search).get('autostart')) return false;   // 脚本/演示自动出发
+      if (localStorage.getItem(SYNC_CHOICE_KEY)) return false;   // 这台机器已经选过（开机自启时不再反复打扰）
     } catch (_) { /* noop */ }
+    // 注意：即使 ?autostart=1 开机自启也要问 —— 之前跳过它，导致新机器一开机就直接开走，邮箱里的旧存档没同步，两台机器各走各的
     try {
       const st = await fetch('/api/mailbox/status').then((x) => x.json()).catch(() => null);
-      if (!st || !st.imapConfigured) return false;       // 没配 IMAP → 没得同步
+      if (!st || !st.imapConfigured || !st.hasArchive) return false;
       const r = await fetch('/api/track/range?from=0000-01-01&to=' + today()).then((x) => x.json()).catch(() => null);
       const days = (r && r.days) || [];
       const pts = days.reduce((n, d) => n + ((d.path || []).length), 0);
-      return pts < 2;                                    // 本机确实是空的
+      return pts < 10 || days.length <= 1;    // 本机几乎没数据 / 只有一天 → 很可能是一台新设备
     } catch (_) { return false; }
   }
 
@@ -2151,6 +2153,7 @@
     // 新设备出发提示：先同步存档 or 直接出发
     if (el.btnSyncFirstGo) {
       el.btnSyncFirstGo.addEventListener('click', async () => {
+        try { localStorage.setItem(SYNC_CHOICE_KEY, 'sync'); } catch (_) { /* noop */ }
         if (el.maskSyncFirst) el.maskSyncFirst.classList.remove('show');
         el.btnSyncFirstGo.disabled = true;
         const old = el.btnSyncFirstGo.textContent;
@@ -2176,6 +2179,7 @@
     }
     if (el.btnSyncFirstSkip) {
       el.btnSyncFirstSkip.addEventListener('click', () => {
+        try { localStorage.setItem(SYNC_CHOICE_KEY, 'skip'); } catch (_) { /* noop */ }
         if (el.maskSyncFirst) el.maskSyncFirst.classList.remove('show');
         log('已选择直接出发（本次不再提示；想同步可在「账号与档案」点「一键同步」，两边会自动合并）');
         startWalk();
