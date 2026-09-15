@@ -108,7 +108,7 @@
     }
 
     async init(container, opts = {}) {
-      const AMap = await loadAmap(this.key, this.securityJsCode, ['AMap.Walking', 'AMap.Geocoder']);
+      const AMap = await loadAmap(this.key, this.securityJsCode, ['AMap.Walking', 'AMap.Geocoder', 'AMap.PlaceSearch']);
       this.AMap = AMap;
       const center = opts.center || { lng: 116.397428, lat: 39.90923 };
       this.map = new AMap.Map(container, {
@@ -124,8 +124,9 @@
       this._frameReady = false;
       try { this.map.on('complete', () => { this._frameReady = true; }); } catch (_) { /* noop */ }
 
-      this.geocoder = new AMap.Geocoder({ radius: 200 });
+      this.geocoder = new AMap.Geocoder({ radius: 200, extensions: 'all' });
       this.walking = new AMap.Walking({ autoFitView: false });
+      this.placeSearch = new AMap.PlaceSearch({ pageSize: 50, extensions: 'all', autoFitView: false });
 
       // 主地图轨迹按速度分色（与轨迹弹窗/日报同一套配色）：
       // ⚠ 不能用"每个速度档一条累计 Polyline"——同档 Polyline 会把它持有的所有点
@@ -361,6 +362,44 @@
             clearTimeout(timer);
             if (status !== 'complete' || !result || !result.regeocode) return finish([]);
             finish(result.regeocode.pois || []);
+          });
+        } catch (err) { clearTimeout(timer); finish([]); }
+      });
+    }
+
+    /** 逆地理取附近的正式场所 POI（医院/学校/地标等，供地点收集册用） */
+    nearbyPlaces(pos) {
+      return new Promise((resolve) => {
+        if (!this._ready || !this.placeSearch) return resolve([]);
+        if (!this._charge('geocode')) return resolve([]);
+        let done = false;
+        const finish = (v) => { if (!done) { done = true; resolve(v); } };
+        const timer = setTimeout(() => finish([]), 8000);
+        try {
+          const c = new this.AMap.LngLat(pos.lng, pos.lat);
+          this.placeSearch.searchNearBy('', c, 200, (status, result) => {
+            clearTimeout(timer);
+            if (status !== 'complete' || !result || !result.poiList || !result.poiList.pois) return finish([]);
+            finish(result.poiList.pois);
+          });
+        } catch (err) { clearTimeout(timer); finish([]); }
+      });
+    }
+
+    /** 按类型 + 范围搜索正式场所（区域补采用，一次返回一批） */
+    searchFormalInBounds(bounds, type) {
+      return new Promise((resolve) => {
+        if (!this._ready || !this.placeSearch) return resolve([]);
+        if (!this._charge('geocode')) return resolve([]);
+        let done = false;
+        const finish = (v) => { if (!done) { done = true; resolve(v); } };
+        const timer = setTimeout(() => finish([]), 10000);
+        try {
+          this.placeSearch.setType(type);
+          this.placeSearch.searchInBounds('', bounds, (status, result) => {
+            clearTimeout(timer);
+            if (status !== 'complete' || !result || !result.poiList || !result.poiList.pois) return finish([]);
+            finish(result.poiList.pois);
           });
         } catch (err) { clearTimeout(timer); finish([]); }
       });

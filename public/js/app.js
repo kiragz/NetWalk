@@ -1626,32 +1626,51 @@
     const day = (await loadAllDays()).find((d) => d.date === date);
     const path = (day && day.path) || [];
     if (path.length < 2) { log(`${date} 没有轨迹可补采`); return; }
-    const samples = [path[0]];
-    let acc = 0;
-    for (let k = 1; k < path.length; k++) {
-      acc += haversineKm(path[k - 1], path[k]);
-      if (acc >= 200) { samples.push(path[k]); acc = 0; }
-    }
-    let calls = 0;
+    // 沿轨迹的包围盒，按正式类别批量 PlaceSearch（一次搜一批，不是逐点调）
+    const lats = path.map((p) => p.lat), lngs = path.map((p) => p.lng);
+    const pad = 0.002;
+    const bounds = new window.AMap.Bounds(
+      [Math.min(...lngs) - pad, Math.min(...lats) - pad],
+      [Math.max(...lngs) + pad, Math.max(...lats) + pad]
+    );
+    const cats = ['医院', '中学', '小学', '大学', '图书馆', '博物馆', '政府机关', '车站', '体育场馆', '地标景点'];
+    const AMAP_TYPES = {
+      '医院': '医疗保健服务', '中学': '中学', '小学': '小学', '大学': '高等院校',
+      '图书馆': '图书馆', '博物馆': '博物馆|展览馆|纪念馆',
+      '政府机关': '政府机关及社会团体', '车站': '火车站|地铁站',
+      '体育场馆': '体育休闲服务|体育场馆', '地标景点': '风景名胜|标志性建筑',
+    };
     const found = new Map();
-    for (const s of samples) {
-      if (calls >= 120) break;
+    let calls = 0;
+    log(`↺ ${date} 重溯补采中… 按 ${cats.length} 类搜索沿途正式地点`);
+    for (const cat of cats) {
+      if (calls >= 15) break;   // 上限 15 次搜索（10 类以内够用）
       calls++;
-      let pois = [];
       try {
-        pois = await Promise.race([
-          state.provider.nearbyPlaces({ lat: s.lat, lng: s.lng }),
-          new Promise((r2) => setTimeout(() => r2([]), 8000)),
+        const result = await Promise.race([
+          state.provider.searchFormalInBounds(bounds, AMAP_TYPES[cat] || cat),
+          new Promise((r2) => setTimeout(() => r2([]), 10000)),
         ]);
-      } catch (_) { pois = []; }
-      for (const p of pickFormalPois(pois, s)) if (!found.has(p.name)) found.set(p.name, p);
-      if (calls % 20 === 0) log(`↺ ${date} 重溯补采中… ${calls}/${samples.length} 段`);
+        const pois = (result && result.poiList && result.poiList.pois) || [];
+        for (const poi of pois) {
+          const name = String(poi.name || '').trim();
+          if (!name || found.has(name)) continue;
+          const loc = poi.location || {};
+          found.set(name, {
+            name: name.slice(0, 60), cat,
+            lat: Number(loc.lat) || 0, lng: Number(loc.lng) || 0,
+            t: Date.now(),
+          });
+        }
+        log(`  ${CAT_ICONS[cat] || '📍'} ${cat}: ${pois.length} 个`);
+      } catch (_) { /* 单类失败不影响其他类 */ }
     }
-    if (!found.size) { log(`↺ ${date} 沿途没有发现正式场所`); return; }
+    const list = [...found.values()].map((p) => ({ ...p, t: Date.now() }));
+    if (!list.length) { log(`↺ ${date} 沿途没有发现正式场所`); return; }
     try {
-      const w = await postJson('/api/places/add', { date, places: [...found.values()] }, 10000);
+      const w = await postJson('/api/places/add', { date, places: list }, 10000);
       if (w && w.ok) {
-        log(`↺ ${date} 重溯补采完成：沿途发现 ${found.size} 个正式地点，新增 ${w.added} 个`);
+        log(`↺ ${date} 补采完成：搜索到 ${list.length} 个正式场所，新增 ${w.added} 个`);
         albumCache = null;
         if (el.maskAlbum && el.maskAlbum.classList.contains('show')) openAlbum();
       } else log('补采写入失败：' + ((w && w.error) || '未知'));

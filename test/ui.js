@@ -492,7 +492,8 @@ const shown = (id) => $(id).classList.contains('show');
     class Polyline { constructor(o) { Object.assign(this, o); this.path = o.path || []; st.polyline = this; (st.speedLines = st.speedLines || []).push(this); } setPath(p) { this.path = p; } getPath() { return this.path; } }
     class OverlayGroup { constructor() { this.overlays = []; st.group = this; } addOverlay(o) { this.overlays.push(o); } }
     class Circle { constructor(o) { Object.assign(this, o); st.circles.push(this); } }
-    class Geocoder { getAddress(lnglat, cb) { cb('complete', { regeocode: { addressComponent: { streetNumber: { street: '测试街道' } } } }); } }
+    class Geocoder { getAddress(lnglat, cb) { cb('complete', { regeocode: { addressComponent: { streetNumber: { street: '测试街道' } }, pois: [] } }); } }
+    class PlaceSearch { constructor(o) { Object.assign(this, o); } setType(t) {} searchInBounds(k, b, cb) { cb('complete', { poiList: { pois: [] } }); } searchNearBy(k, c, r, cb) { cb('complete', { poiList: { pois: [] } }); } }
     class Walking {
       search(o, d, cb) {
         cb('complete', {
@@ -508,7 +509,7 @@ const shown = (id) => $(id).classList.contains('show');
       }
     }
     const AMap = {
-      Map, Marker, Polyline, OverlayGroup, Circle, Geocoder, Walking, LngLat, Pixel,
+      Map, Marker, Polyline, OverlayGroup, Circle, Geocoder, PlaceSearch, Walking, LngLat, Pixel,
       plugin(plugins, cb) { st.pluginCalls.push(plugins.slice()); if (cb) cb(); },
     };
     return { AMap, st };
