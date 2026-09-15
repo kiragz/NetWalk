@@ -843,6 +843,12 @@
       res.pulled = '存档 ' + res.days + ' 天';
       if (mp.result && mp.result.resetTakeover) res.takeover = true;
       if (mp.keyRestored) res.keyRestored = true;
+      // 收集册也跟着存档回来了（换电脑后不用重新采）
+      const pm = mp.result && mp.result.places;
+      if (pm && (pm.added || pm.merged)) {
+        res.places = pm;
+        res.pulled += '，收集册 +' + pm.added + ' 个地点';
+      }
       // 明确告诉用户接下来会从哪里继续（跨设备同步后尤其重要，不然不知道有没有同步对）
       try {
         const lp = await fetch('/api/lastpos').then((x) => x.json()).catch(() => null);
@@ -882,7 +888,9 @@
         }
         const extras = [];
         if (j.restoredKeys && j.restoredKeys.length) extras.push('配置 ' + j.restoredKeys.length + ' 项');
-        log(`已从邮箱同步最新存档（${imp.mergedDays != null ? imp.mergedDays + ' 天' : '完成'}）`
+        const pm = imp.places;
+        if (pm && (pm.added || pm.merged)) extras.push('收集册 ' + pm.added + ' 个新地点' + (pm.merged ? '（补齐 ' + pm.merged + ' 条路名/距离）' : ''));
+        log(`已从邮箱同步最新存档（${imp.total != null ? imp.total + ' 天' : '完成'}）`
           + (extras.length ? '，并恢复' + extras.join('、') : '')
           + '，将从上次结束点继续');
       }
@@ -2009,8 +2017,10 @@
         body: JSON.stringify({ code }),
       }).then((x) => x.json());
       if (!r.ok) throw new Error(r.error || '导入失败');
-      el.arHint.textContent = `导入成功：新增 ${r.added} 天，合并 ${r.merged} 天，当前共 ${r.days} 天`;
-      log(`存档导入完成（新增 ${r.added} 天 / 合并 ${r.merged} 天）`);
+      const pm = r.places;
+      const pTxt = (pm && (pm.added || pm.merged)) ? `，收集册 +${pm.added} 个地点` : '';
+      el.arHint.textContent = `导入成功：新增 ${r.added} 天，合并 ${r.merged} 天，当前共 ${r.days} 天${pTxt}`;
+      log(`存档导入完成（新增 ${r.added} 天 / 合并 ${r.merged} 天${pTxt}）`);
       // 手动导入 = 明确要恢复这份数据，解除"重置后暂停自动同步"
       try { localStorage.removeItem('netwalkNoAutoSync'); } catch (_) { /* noop */ }
       // 存档码里带了本机配置（高德 Key / 邮箱）→ 提示可一键恢复（换设备免手填）

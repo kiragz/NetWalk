@@ -37,7 +37,7 @@ function pickCarryConfig(cfg) {
   return out;
 }
 
-function exportArchive(store, achStore, machineCfg) {
+function exportArchive(store, achStore, machineCfg, placeStore) {
   const dates = store.listDates();
   const tracks = {};
   for (const d of dates) tracks[d] = store.get(d);
@@ -50,6 +50,14 @@ function exportArchive(store, achStore, machineCfg) {
     tracks,
     achievements: achStore ? achStore.data : { unlocked: {} },
   };
+  // 地点收集册也一起带走（换电脑后不用重采）。旧版本读这份存档会忽略该字段，向后兼容。
+  if (placeStore && typeof placeStore.load === 'function') {
+    try {
+      const pd = placeStore.load();
+      const days = (pd && pd.days) || {};
+      if (Object.keys(days).length) payload.places = days;
+    } catch (_) { /* 收集册读取失败不影响主存档 */ }
+  }
   // 可选：把本机配置（地图 Key / 邮箱）一起带走。旧版本读这个字段会忽略，向后兼容。
   const cfg = pickCarryConfig(machineCfg);
   if (Object.keys(cfg).length) payload.cfg = cfg;
@@ -90,7 +98,7 @@ function decodeArchive(code) {
  * 导入并合并
  * @returns {{added:number, merged:number, total:number, achievements:number}}
  */
-function importArchive(code, store, achStore) {
+function importArchive(code, store, achStore, placeStore) {
   const payload = decodeArchive(code);
   // ---- 重置语义（0.9.10）：双方比较 resetAt，按时间戳决定谁说了算 ----
   const incomingReset = Number(payload.resetAt) || 0;
@@ -101,6 +109,7 @@ function importArchive(code, store, achStore) {
     // 然后导入对端（只含重置后）的数据。这正是"重置通过存档传播到所有设备"。
     if (store.clearAllDays) store.clearAllDays();
     if (achStore) achStore.forgetAll();
+    if (placeStore && placeStore.clearAll) placeStore.clearAll();   // 收集册一并清空
     if (store.setResetAt) store.setResetAt(incomingReset);
     takeover = true;
   } else if (localReset > incomingReset) {
@@ -127,6 +136,15 @@ function importArchive(code, store, achStore) {
       }
       payload.achievements.unlocked = u;
     }
+    // 收集册同样按重置时间过滤
+    if (payload.places && typeof payload.places === 'object') {
+      const fp = {};
+      for (const [d, list] of Object.entries(payload.places)) {
+        const keep = (Array.isArray(list) ? list : []).filter((p) => Number(p && p.t) >= cutoff);
+        if (keep.length) fp[d] = keep;
+      }
+      payload.places = fp;
+    }
   }
 
   let added = 0;
@@ -148,6 +166,11 @@ function importArchive(code, store, achStore) {
     }
   }
   const achCount = achStore ? achStore.merge(payload.achievements) : 0;
+  // 收集册合并（按天 + 名字去重，本机已有条目优先，仅补 road/dist）
+  let placesMerged = null;
+  if (placeStore && typeof placeStore.mergeDays === 'function' && payload.places) {
+    try { placesMerged = placeStore.mergeDays(payload.places); } catch (_) { placesMerged = null; }
+  }
   // 出发序号是全局的（跨天累加），合并后必须按时间全局重排，
   // 否则两台设备各自的「第 1、2、3 次」会冲突，出发次数对不上。
   if (store && typeof store.renumberSessions === 'function') store.renumberSessions();
@@ -156,6 +179,7 @@ function importArchive(code, store, achStore) {
   const cfg = pickCarryConfig(payload.cfg);
   return {
     added, merged, total: added + merged, achievements: achCount,
+    places: placesMerged,
     resetTakeover: takeover,
     cfg: Object.keys(cfg).length ? cfg : null,
   };

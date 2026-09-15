@@ -181,6 +181,50 @@ p.planRoute(from, { lat: far.lat, lng: far.lng }).then(async (route) => {
   try { importArchive('NW2.abcdef', s2, a2); ok(false, '错误前缀应报错'); }
   catch (_) { ok(true, '错误前缀被拒绝'); }
 
+  console.log('\n== 7.5 收集册随存档同步 ==');
+  const { PlaceStore } = require('./places.js');
+  const p1 = new PlaceStore(tmpDir);
+  p1.add('2026-09-10', [
+    { name: '广州东站', cat: '车站', lat: 23.1492, lng: 113.3245, road: '东站路', t: 1789000000000 },
+    { name: '测试人民医院', cat: '医院', lat: 23.1490, lng: 113.3240, road: '东站路', t: 1789000001000 },
+  ]);
+  const expP = exportArchive(s1, a1, null, p1);
+  const p2 = new PlaceStore(path.join(tmpDir, 'b'));
+  const impP = importArchive(expP.code, s2, a2, p2);
+  ok(impP.places && impP.places.added === 2, '收集册随存档带走并合并（+2）', JSON.stringify(impP.places));
+  const backPlaces = (p2.load().days['2026-09-10'] || []);
+  ok(backPlaces.length === 2 && backPlaces[0].road === '东站路', '地点带着路名回来了',
+    JSON.stringify(backPlaces.map((x) => x.name + '/' + x.road)));
+  const impP2 = importArchive(expP.code, s2, a2, p2);
+  ok(impP2.places && impP2.places.added === 0, '重复导入不产生重复地点（幂等）', JSON.stringify(impP2.places));
+  ok((p2.load().days['2026-09-10'] || []).length === 2, '重复导入后地点总数不变');
+  // 本机已有条目优先：只补缺失的 road
+  p2.save({ v: 1, days: { '2026-09-10': [{ name: '测试人民医院', cat: '医院', lat: 23.149, lng: 113.324, t: 1789000001000 }] } });
+  const impP3 = importArchive(expP.code, s2, a2, p2);
+  const filled = (p2.load().days['2026-09-10'] || []).find((x) => x.name === '测试人民医院');
+  ok(impP3.places.merged >= 1 && filled && filled.road === '东站路', '已有条目只补 road 不重复添加',
+    JSON.stringify(filled));
+  // 对端更晚重置 → 接管并清空本机收集册
+  const dirD = path.join(tmpDir, 'd');
+  const s4 = new TrackStore(dirD);
+  s4.appendPath('2026-09-11', track);
+  s4.setResetAt(1790000000000);                       // 对端重置得更晚
+  const p4 = new PlaceStore(dirD);
+  p4.add('2026-09-11', [{ name: '新的地点', cat: '医院', lat: 23.2, lng: 113.2, t: 1790000001000 }]);
+  const expNew = exportArchive(s4, new AchievementStore(dirD), null, p4);
+  const dirC = path.join(tmpDir, 'c');
+  const p3 = new PlaceStore(dirC);
+  p3.add('2026-09-10', [{ name: '旧地点', cat: '医院', lat: 23.1, lng: 113.1, t: 1700000000000 }]);
+  const s3 = new TrackStore(dirC);
+  s3.setResetAt(1700000000000);                       // 本机重置得更早
+  const impTake = importArchive(expNew.code, s3, new AchievementStore(dirC), p3);
+  const after = p3.load().days['2026-09-11'] || [];
+  const oldLeft = Object.values(p3.load().days).flat().some((x) => x.name === '旧地点');
+  ok(!oldLeft && after.some((x) => x.name === '新的地点'),
+    '对端重置接管 → 本机旧收集册被清空并换成对端数据',
+    JSON.stringify(Object.values(p3.load().days).flat().map((x) => x.name)));
+  ok(impTake.resetTakeover === true, '接管标记为 true');
+
   console.log('\n== 8. 聚合统计 ==');
   const agg = s2.aggregate();
   ok(agg.days === 1, '聚合天数正确', agg.days);

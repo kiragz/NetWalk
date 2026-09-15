@@ -188,6 +188,9 @@ const store = new TrackStore(ACTIVE_DATA);
 const { PlaceStore } = require('./places');
 const achStore = new AchievementStore(ACTIVE_DATA);
 const placeStore = new PlaceStore(ACTIVE_DATA);
+// 收集册随存档同步：包装一层，避免每个调用点都要记得传 placeStore
+const exportArchiveFull = (s1, a1, cfg) => exportArchive(s1, a1, cfg, placeStore);
+const importArchiveFull = (code, s1, a1) => importArchive(code, s1, a1, placeStore);
 
 /** 把 range + date 解析成日期闭区间 */
 function rangeToBounds(range, date) {
@@ -451,7 +454,7 @@ app.post('/api/account/register', (req, res) => {
   activeAccount = acc;   // 同步内存态：重启前的 rename/reset 也能识别
   // 存档码自动发到邮箱（配置了邮件服务才有；换设备时从邮箱复制即可接着走）
   if (mailConfigured(config)) {
-    const code = exportArchive(store, achStore, config).code;
+    const code = exportArchiveFull(store, achStore, config).code;
     sendArchiveMail(config, archiveRecipient(), code, logLine, machineConfigText(config))
       .then((r) => { if (r && !r.ok) logLine('注册后存档邮件未发出：' + (r.error || '')); });
   }
@@ -475,7 +478,7 @@ app.post('/api/account/login', (req, res) => {
   activeAccount = acc;   // 同步内存态
   // 登录也发一份最新存档码到邮箱：换设备时打开邮箱复制即可接着走
   if (mailConfigured(config)) {
-    const code = exportArchive(store, achStore, config).code;
+    const code = exportArchiveFull(store, achStore, config).code;
     sendArchiveMail(config, archiveRecipient(), code, logLine, machineConfigText(config))
       .then((r) => { if (r && !r.ok) logLine('登录后存档邮件未发出：' + (r.error || '')); });
   }
@@ -523,6 +526,7 @@ app.post('/api/account/reset', (req, res) => {
       }
     }
     achStore.forgetAll();   // 内存里的解锁记录也要清，否则 shutdown/save 会写回
+    placeStore.clearAll();  // 地点收集册一并清空（与轨迹同步重置）
     removed++;
     // 出发点【保持不变】：重置的是"走过的数据"，不是"从哪里出发"。
     // 以前这里会把 origin 打回 DEFAULT（深圳城市中心），用户重置完就从深圳重新开始，
@@ -790,7 +794,7 @@ app.post('/api/session/end', async (req, res) => {
     } else if (config.autoMailArchive === false) {
       mail = { ok: false, to, error: '已在设置里关闭「结束自动发存档」' };
     } else {
-      const { code } = exportArchive(store, achStore, config);
+      const { code } = exportArchiveFull(store, achStore, config);
       const r = await Promise.race([
         sendArchiveMail(config, to, code, logLine, machineConfigText(config)),
         new Promise((done) => setTimeout(() => done({ ok: false, error: '发送超时（检查授权码/网络后点「重新发送」）' }), 15000)),
@@ -822,7 +826,7 @@ function tryHourlyArchiveMail() {
     if (!to) return;
     if (Date.now() - lastHourlyMailAt < HOURLY_MAIL_MS) return;
     lastHourlyMailAt = Date.now();
-    const { code } = exportArchive(store, achStore, config);
+    const { code } = exportArchiveFull(store, achStore, config);
     const stamp = new Date().toTimeString().slice(0, 5);
     sendArchiveMail(config, to, code, logLine, machineConfigText(config) + "\n(本封为「每小时自动存档」 " + stamp + ")")
       .then((r) => logLine(r && r.ok
@@ -900,6 +904,7 @@ app.post('/api/profile/reset', (req, res) => {
       }
     }
   } catch (err) { logLine('profile reset 清轨迹失败：' + (err && err.message ? err.message : err)); }
+  try { placeStore.clearAll(); } catch (_) { /* 收集册一并清空 */ }
   const p = profileMod.resetAll({
     name: (profileMod.load() || {}).name,
     city: String(b.city || ''),
@@ -971,7 +976,7 @@ app.post('/api/mailbox/pull', (req, res) => {
     if (!r.ok) return res.json({ ok: false, error: r.error });
     // importArchive 失败会抛异常；能走到下一行就说明导入成功了。
     // （以前写成 Boolean(imp && imp.ok)，而 importArchive 不返回 ok 字段 → 成功也报失败）
-    const imp = importArchive(r.code, store, achStore);
+    const imp = importArchiveFull(r.code, store, achStore);
     const cloudConfig = r.mailText ? parseMachineConfigText(r.mailText) : {};
     // 一键同步 = 换设备续档。存档里携带的本机配置（高德 Key / 邮箱 / 出发点）要一并恢复，
     // 否则新设备同步完数据却没 Key，只能继续在虚拟路网里走。
@@ -1065,7 +1070,7 @@ app.post('/api/mailbox/push', (req, res) => {
   if (!to) return res.json({ ok: false, error: '还没填邮箱账号（config.mailUser 为空）' });
   let code;
   try {
-    code = exportArchive(store, achStore, config).code;
+    code = exportArchiveFull(store, achStore, config).code;
   } catch (e) {
     return res.json({ ok: false, error: '生成存档码失败：' + (e && e.message ? e.message : e) });
   }
@@ -1103,7 +1108,7 @@ app.get('/api/stats', (req, res) => {
 // ---------- 存档码 ----------
 app.post('/api/archive/export', (req, res) => {
   try {
-    const r = exportArchive(store, achStore, config);
+    const r = exportArchiveFull(store, achStore, config);
     res.json({ ok: true, ...r });
   } catch (err) {
     res.status(500).json({ ok: false, error: err.message });
@@ -1113,7 +1118,7 @@ app.post('/api/archive/export', (req, res) => {
 app.post('/api/archive/import', (req, res) => {
   try {
     const code = (req.body && req.body.code) || '';
-    const r = importArchive(code, store, achStore);
+    const r = importArchiveFull(code, store, achStore);
     const agg = store.aggregate();
     const st = achStore.refresh(agg);
     // r.cfg 只用于告诉前端「这个码里带了本机配置」，**不自动应用**（可能是别人的码）

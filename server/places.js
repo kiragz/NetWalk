@@ -60,6 +60,56 @@ class PlaceStore {
     return added;
   }
 
+  /** 清空全部收录（重置 / 对端重置接管时用） */
+  clearAll() {
+    this.save({ v: 1, days: {} });
+  }
+
+  /**
+   * 合并另一份按天收录（跨设备同步用）：
+   * 同一天同名去重；本机已有条目优先保留，仅补上缺失的 road/dist。
+   * @returns {{added:number, merged:number, days:number}}
+   */
+  mergeDays(days) {
+    if (!days || typeof days !== 'object') return { added: 0, merged: 0, days: 0 };
+    const data = this.load();
+    let added = 0, merged = 0, touchedDays = 0;
+    for (const [date, list] of Object.entries(days)) {
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date) || !Array.isArray(list) || !list.length) continue;
+      const cur = data.days[date] || (data.days[date] = []);
+      const byName = new Map(cur.map((p) => [p.name, p]));
+      if (!cur.length) touchedDays++;
+      for (const p of list) {
+        const name = String((p && p.name) || '').trim().slice(0, 60);
+        if (!name) continue;
+        const cat = String((p && p.cat) || '其他').slice(0, 12);
+        const lat = Number(p && p.lat), lng = Number(p && p.lng);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+        if (lat < -85 || lat > 85 || lng < -180 || lng > 180) continue;
+        const road = String((p && p.road) || '').trim().slice(0, 30);
+        const dist = Number(p && p.dist);
+        const exist = byName.get(name);
+        if (exist) {
+          let changed = false;
+          if (!exist.road && road) { exist.road = road; changed = true; }
+          if (Number.isFinite(dist) && (!Number.isFinite(Number(exist.dist)) || dist < Number(exist.dist))) {
+            exist.dist = Math.round(dist); changed = true;
+          }
+          if (changed) merged++;
+          continue;
+        }
+        const item = { name, cat, lat: Number(lat.toFixed(6)), lng: Number(lng.toFixed(6)), t: Math.round(Number(p && p.t) || Date.now()) };
+        if (road) item.road = road;
+        if (Number.isFinite(dist) && dist >= 0 && dist <= 99999) item.dist = Math.round(dist);
+        cur.push(item);
+        byName.set(name, item);
+        added++;
+      }
+    }
+    if (added || merged) this.save(data);
+    return { added, merged, days: touchedDays };
+  }
+
   /** 按日期范围返回（新日期在前） */
   range(from, to) {
     const data = this.load();
