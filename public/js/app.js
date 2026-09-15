@@ -99,7 +99,7 @@
     mailBoxStatus: $('mailBoxStatus'), btnMailStatus: $('btnMailStatus'), btnMailPush: $('btnMailPush'),
     autoMailArchive: $('autoMailArchive'), hourlyMailArchive: $('hourlyMailArchive'), btnMailClean: $('btnMailClean'),
     btnSnapTrack: $('btnSnapTrack'), btnFollow: $('btnFollow'),
-    btnRepairUndo: $('btnRepairUndo'), btnAlbum: $('btnAlbum'), maskAlbum: $('maskAlbum'), albumBody: $('albumBody'), albumSummary: $('albumSummary'), albumTabs: $('albumTabs'), btnAlbumClose: $('btnAlbumClose'),
+    btnRepairUndo: $('btnRepairUndo'), btnAlbum: $('btnAlbum'), btnAlbumQuick: $('btnAlbumQuick'), maskAlbum: $('maskAlbum'), albumBody: $('albumBody'), albumSummary: $('albumSummary'), albumTabs: $('albumTabs'), btnAlbumClose: $('btnAlbumClose'),
     albumAddName: $('albumAddName'), albumAddCat: $('albumAddCat'), btnAlbumAdd: $('btnAlbumAdd'), btnAlbumBackfill: $('btnAlbumBackfill'),
     maskSyncFirst: $('maskSyncFirst'), btnSyncFirstGo: $('btnSyncFirstGo'), btnSyncFirstSkip: $('btnSyncFirstSkip'), syncFirstHint: $('syncFirstHint'),
     btnRepairArea: $('btnRepairArea'), btnRepairGo: $('btnRepairGo'), btnRepairCancel: $('btnRepairCancel'),
@@ -2409,6 +2409,7 @@
     // 数据
     el.btnStats.addEventListener('click', openStats);
     el.btnAlbum.addEventListener('click', openAlbum);
+    if (el.btnAlbumQuick) el.btnAlbumQuick.addEventListener('click', openAlbum);   // 主面板「复制码/分享」之间的直达按钮
     el.btnAlbumClose.addEventListener('click', () => { if (el.maskAlbum) el.maskAlbum.classList.remove('show'); });
     if (el.albumTabs) el.albumTabs.addEventListener('click', (e) => {
       const btn = e.target.closest && e.target.closest('.ach-tab');
