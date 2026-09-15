@@ -101,6 +101,7 @@
     btnSnapTrack: $('btnSnapTrack'), btnFollow: $('btnFollow'),
     btnRepairUndo: $('btnRepairUndo'), btnAlbum: $('btnAlbum'), btnAlbumQuick: $('btnAlbumQuick'), maskAlbum: $('maskAlbum'), albumBody: $('albumBody'), albumSummary: $('albumSummary'), albumTabs: $('albumTabs'), btnAlbumClose: $('btnAlbumClose'),
     albumAddName: $('albumAddName'), albumAddCat: $('albumAddCat'), btnAlbumAdd: $('btnAlbumAdd'), btnAlbumBackfill: $('btnAlbumBackfill'),
+    albumNav: $('albumNav'), albumPrev: $('albumPrev'), albumNext: $('albumNext'), albumDate: $('albumDate'),
     maskSyncFirst: $('maskSyncFirst'), btnSyncFirstGo: $('btnSyncFirstGo'), btnSyncFirstSkip: $('btnSyncFirstSkip'), syncFirstHint: $('syncFirstHint'),
     btnRepairArea: $('btnRepairArea'), btnRepairGo: $('btnRepairGo'), btnRepairCancel: $('btnRepairCancel'),
     repairInfo: $('repairInfo'), repairBar: $('repairBar'), pickBox: $('pickBox'), netBanner: $('netBanner'),
@@ -119,7 +120,8 @@
     lastMail: null,           // 上次「结束漫游」的自动发信结果 { ok, to, error }
     syncPromptDone: false,    // 本次会话是否已问过「要不要先同步存档」
     poiTimer: null,           // 地点收集定时器
-    albumRange: 'all',        // 收集册显示范围：all / day
+    albumRange: 'all',        // 收集册显示范围：all / day（按天回顾）
+    albumDate: '',            // 「按天回顾」当前选中的日期
     lastCollectPos: null,     // 上次采集位置（避免原地重复采）
     lastRoad: '',             // 上一条走过的路（换路时立即采集）
     lastCollectAt: 0,         // 上次采集时间（换路触发的限流）
@@ -1602,26 +1604,89 @@
       ]);
       const placeDays = ((sum && sum.list) || []).slice();
       const trackDates = ((tr && tr.days) || []).map((d) => d.date).filter((d, i, a) => a.indexOf(d) === i);
+      // 有收录、但轨迹里没有的那天也要能回顾（比如手动添加过地点）
+      for (const pd of placeDays) if (!trackDates.includes(pd.date) && pd.places && pd.places.length) trackDates.push(pd.date);
+      // 每天的轨迹点数（顺带显示，方便判断这天走了多少）
+      const trackInfo = {};
+      for (const d of (tr && tr.days) || []) trackInfo[d.date] = Number(d.count) || 0;
       const merged = trackDates.slice().sort((a, b) => (a < b ? 1 : -1)).map((date) => ({
         date,
         places: ((placeDays.find((x) => x.date === date) || {}).places || []).slice(),
       }));
-      albumCache = { list: merged };
-      renderAlbum();
+      albumCache = { list: merged, trackInfo };
+      // 默认选中今天（今天没数据就选最近一天）
+      if (!merged.some((d) => d.date === state.albumDate)) {
+        state.albumDate = (merged.find((d) => d.date === today()) || merged[0] || {}).date || '';
+      }
+      fillAlbumDates(merged);
+      setAlbumRange(state.albumRange);   // 内部会调 renderAlbum（并按需显示日期选择器）
     } catch (e) {
       if (el.albumSummary) el.albumSummary.textContent = '加载失败：' + (e && e.message ? e.message : e);
     }
   }
 
+  /** 填充「按天回顾」的日期下拉（新日期在前），并显示当前选中项 */
+  function fillAlbumDates(list) {
+    if (!el.albumDate) return;
+    const days = (list || (albumCache && albumCache.list) || []);
+    const cur = days.some((d) => d.date === state.albumDate) ? state.albumDate : (days[0] && days[0].date) || '';
+    state.albumDate = cur;
+    el.albumDate.innerHTML = days.map((d) => {
+      const n = (d.places || []).length;
+      const mark = n ? `（${n} 个）` : '（无记录）';
+      return `<option value="${d.date}"${d.date === cur ? ' selected' : ''}>📅 ${d.date}${mark}</option>`;
+    }).join('') || '<option value="">（还没有任何数据）</option>';
+    if (el.albumDate.value !== cur) el.albumDate.value = cur;
+  }
+
+  /** 翻到上/下一天（按日期列表顺序，新日期在前） */
+  function stepAlbumDate(delta) {
+    const days = (albumCache && albumCache.list) || [];
+    if (!days.length) return;
+    const i = days.findIndex((d) => d.date === state.albumDate);
+    const next = days[Math.max(0, Math.min(days.length - 1, (i < 0 ? 0 : i) + delta))];
+    if (!next) return;
+    state.albumDate = next.date;
+    fillAlbumDates(days);
+    renderAlbum();
+  }
+
+  /** 切换「全部 / 按天回顾」 */
+  function setAlbumRange(range) {
+    state.albumRange = (range === 'day') ? 'day' : 'all';
+    if (el.albumTabs) {
+      for (const b of el.albumTabs.querySelectorAll('.ach-tab')) {
+        b.classList.toggle('on', b.dataset.range === state.albumRange);
+      }
+    }
+    if (el.albumNav) el.albumNav.style.display = (state.albumRange === 'day') ? 'flex' : 'none';
+    if (state.albumRange === 'day') fillAlbumDates();
+    renderAlbum();
+  }
+
   function renderAlbum() {
     const days = (albumCache && albumCache.list) || [];
-    const shown = (state.albumRange === 'day') ? days.filter((d) => d.date === today()).slice(0, 1) : days;
+    const shown = (state.albumRange === 'day') ? days.filter((d) => d.date === state.albumDate) : days;
     let total = 0;
     const byCat = {};
-    for (const d of shown) for (const p of d.places) { total++; byCat[p.cat] = (byCat[p.cat] || 0) + 1; }
-    if (el.albumSummary) el.albumSummary.textContent = total
-      ? `共 ${total} 个地点 · ${shown.length} 天 · ` + Object.entries(byCat).map(([k, v]) => `${albumCatIcon(k)}${k} ${v}`).join(' · ')
-      : '还没有收集到正式地点（高德模式下行走时自动收集；老数据可用「↺ 重溯补采」补录）';
+    let roads = 0;
+    for (const d of shown) {
+      const set = new Set();
+      for (const p of d.places) { total++; byCat[p.cat] = (byCat[p.cat] || 0) + 1; if (p.road) set.add(p.road); }
+      roads += set.size;
+    }
+    const catTxt = Object.entries(byCat).map(([k, v]) => `${albumCatIcon(k)}${k} ${v}`).join(' · ');
+    if (el.albumSummary) {
+      if (total) {
+        el.albumSummary.textContent = (state.albumRange === 'day')
+          ? `📅 ${state.albumDate} · ${total} 个地点 · ${roads} 条路` + (catTxt ? ' · ' + catTxt : '')
+          : `共 ${total} 个地点 · ${shown.length} 天` + (catTxt ? ' · ' + catTxt : '');
+      } else if (state.albumRange === 'day') {
+        el.albumSummary.textContent = `📅 ${state.albumDate} 还没有收录地点 —— 点下面的「↺ 重溯补采」按这天的轨迹补录。`;
+      } else {
+        el.albumSummary.textContent = '还没有收集到正式地点（高德模式下行走时自动收集；老数据可用「↺ 重溯补采」补录）';
+      }
+    }
     if (el.albumBody) {
       el.albumBody.innerHTML = shown.map((d) => {
         // 按路名分组：路名做小标题，该路上收集到的地点列在下面；没记路名的归到末尾
@@ -1640,7 +1705,8 @@
           `<div style="margin:8px 0 2px;padding:3px 8px;background:var(--bg-dim,rgba(127,127,127,.12));border-left:3px solid var(--accent,#7c6cf0);border-radius:4px;font-weight:700;display:flex;justify-content:space-between;align-items:center"><span>🛣️ ${road}</span><span style="opacity:.6;font-weight:400">${places.length} 个</span></div>`,
           places.map((p) => `<div style="padding:2px 0 2px 18px;display:flex;justify-content:space-between;align-items:center;gap:8px"><span style="color:var(--txt-dim)">${albumCatIcon(p.cat)} <b style="color:var(--txt)">${p.name}</b> <span style="opacity:.7">· ${p.cat}</span></span><span class="album-del" data-date="${d.date}" data-name="${p.name}" title="从收集册删除" style="cursor:pointer;opacity:.45;font-weight:700">✕</span></div>`).join(''),
         ].join('')).join('');
-        return `<div style="margin:10px 0 4px;font-weight:700;display:flex;justify-content:space-between;align-items:center"><span>📅 ${d.date} · ${d.places.length} 个 · ${entries.length} 条路</span><button class="btn sm" data-backfill="${d.date}" title="沿这天的实际轨迹按类别搜索，补录漏掉的正式地点" style="padding:2px 8px">↺ 重溯补采</button></div>` + groupHtml;
+        const tPts = ((albumCache && albumCache.trackInfo) || {})[d.date] || 0;
+        return `<div style="margin:10px 0 4px;font-weight:700;display:flex;justify-content:space-between;align-items:center"><span>📅 ${d.date} · ${d.places.length} 个 · ${entries.length} 条路${tPts ? ' · 轨迹 ' + tPts + ' 点' : ''}</span><button class="btn sm" data-backfill="${d.date}" title="沿这天的实际轨迹按类别搜索，补录漏掉的正式地点" style="padding:2px 8px">↺ 重溯补采</button></div>` + groupHtml;
       }).join('') || '<div class="hint">暂无记录</div>';
     }
   }
@@ -2514,10 +2580,15 @@
     if (el.albumTabs) el.albumTabs.addEventListener('click', (e) => {
       const btn = e.target.closest && e.target.closest('.ach-tab');
       if (!btn) return;
-      [...el.albumTabs.children].forEach((c) => c.classList.toggle('on', c === btn));
-      state.albumRange = btn.dataset.range || 'all';
+      setAlbumRange(btn.dataset.range || 'all');
+    });
+    // 「按天回顾」：日期下拉 + 前一天/后一天
+    if (el.albumDate) el.albumDate.addEventListener('change', () => {
+      state.albumDate = el.albumDate.value || '';
       renderAlbum();
     });
+    if (el.albumPrev) el.albumPrev.addEventListener('click', () => stepAlbumDate(1));   // 列表新→旧，+1 是更早的一天
+    if (el.albumNext) el.albumNext.addEventListener('click', () => stepAlbumDate(-1));
     el.maskAlbum.addEventListener('click', (e) => { if (e.target === el.maskAlbum) el.maskAlbum.classList.remove('show'); });
     // 收集册：删除 / 手动添加 / 重溯补采
     if (el.albumBody) el.albumBody.addEventListener('click', async (e) => {

@@ -108,6 +108,7 @@ let MAIL_STUB = { ok: true, to: '172805132@qq.com', error: '' };   // 模拟服�
 const calls = [];
 const postBodies = [];   // 记录 /api/config 的 POST 载荷，用于校验出发点配置
 const PLACES_POSTS = [];   // 记录 /api/places/add 的载荷（收集册实时采集测试用）
+let PLACES_DAYS = [];      // /api/places 返回的按天数据（收集册按天回顾测试用）
 win.fetch = function (url, opt) {
   const u = String(url);
   calls.push((opt && opt.method ? opt.method : 'GET') + ' ' + u);
@@ -139,7 +140,8 @@ win.fetch = function (url, opt) {
     try { PLACES_POSTS.push(JSON.parse(opt.body || '{}')); } catch (_) { PLACES_POSTS.push(null); }
     return json({ ok: true, added: 2 });
   }
-  if (u.indexOf('/api/places') === 0) return json({ ok: true, days: [] });
+  // 注意：/api/places/summary 用 list 字段，/api/places 用 days 字段，两个都要给
+  if (u.indexOf('/api/places') === 0) return json({ ok: true, list: PLACES_DAYS, days: PLACES_DAYS });
   if (u.indexOf('/api/amapcheck') === 0) {
     return json({ ok: true, keyed: true, reachable: false, status: 0, ms: 1200, keyRejected: false, error: 'timeout', hint: '服务端直连高德失败（timeout）→ 检查代理是否把 *.amap.com 走了境外' });
   }
@@ -940,6 +942,57 @@ const shown = (id) => $(id).classList.contains('show');
   $('btnMapDismiss').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
   await sleep(40);
   ok('点 ✕ 关闭提示条', !shown('mapBanner'));
+
+  // T：收集册按天回顾（日期下拉 + 前后翻天）
+  console.log('\n== T. 收集册按天回顾 ==');
+  const oldTrackDays = TRACK_RANGE_DAYS;
+  const oldPlacesDays = PLACES_DAYS;
+  TRACK_RANGE_DAYS = [{ date: '2026-09-13', count: 3 }, { date: '2026-09-14', count: 5 }, { date: TODAY, count: 2 }];
+  PLACES_DAYS = [
+    { date: TODAY, places: [{ name: '今天的医院', cat: '医院', road: '天润路', lat: 23.1, lng: 113.3 }] },
+    { date: '2026-09-14', places: [{ name: '前天的学校', cat: '中学', road: '广园快速路辅路', lat: 23.1, lng: 113.3 }] },
+  ];
+  $('btnAlbumQuick').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(300);
+  ok('收集册已打开', shown('maskAlbum'));
+  ok('「全部」模式列出所有天', $('albumBody').textContent.indexOf('2026-09-13') >= 0
+    && $('albumBody').textContent.indexOf(TODAY) >= 0);
+  ok('默认隐藏日期选择器', !$('albumNav').style.display || $('albumNav').style.display === 'none', $('albumNav').style.display);
+  // 切到「按天回顾」
+  [...$('albumTabs').children].find((b) => b.dataset.range === 'day')
+    .dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(120);
+  ok('切到按天回顾后显示日期选择器', $('albumNav').style.display === 'flex', $('albumNav').style.display);
+  ok('日期下拉列出全部有轨迹的天（新日期在前）', $('albumDate').options.length === 3
+    && $('albumDate').options[0].value === TODAY, $('albumDate').options.length + '/' + ($('albumDate').options[0] || {}).value);
+  ok('默认选中今天', $('albumDate').value === TODAY, $('albumDate').value);
+  ok('只显示选中那天的地点', $('albumBody').textContent.indexOf('今天的医院') >= 0
+    && $('albumBody').textContent.indexOf('前天的学校') < 0);
+  ok('摘要写明是哪一天', $('albumSummary').textContent.indexOf(TODAY) >= 0, $('albumSummary').textContent);
+  // 选另一天
+  $('albumDate').value = '2026-09-14';
+  $('albumDate').dispatchEvent(new win.Event('change'));
+  await sleep(120);
+  ok('切换到 2026-09-14 后只显示那天', $('albumBody').textContent.indexOf('前天的学校') >= 0
+    && $('albumBody').textContent.indexOf('今天的医院') < 0);
+  ok('切换后摘要跟着变', $('albumSummary').textContent.indexOf('2026-09-14') >= 0, $('albumSummary').textContent);
+  // 翻天（› = 更新的一天）
+  $('albumNext').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(120);
+  ok('点 › 跳到更新的一天', $('albumDate').value === TODAY, $('albumDate').value);
+  $('albumPrev').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(120);
+  ok('点 ‹ 跳回前一天', $('albumDate').value === '2026-09-14', $('albumDate').value);
+  // 没有收录的那天也给得出补采入口
+  $('albumDate').value = '2026-09-13';
+  $('albumDate').dispatchEvent(new win.Event('change'));
+  await sleep(120);
+  ok('无收录的那天提示可补采', $('albumSummary').textContent.indexOf('重溯补采') >= 0, $('albumSummary').textContent);
+  ok('无收录的那天也有补采按钮', $('albumBody').querySelector('[data-backfill="2026-09-13"]') !== null);
+  // 还原桩，关闭面板
+  TRACK_RANGE_DAYS = oldTrackDays;
+  PLACES_DAYS = oldPlacesDays;
+  $('btnAlbumClose').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
 
   console.log('\n===== UI 测试结果：' + pass + ' 通过 / ' + fail + ' 失败 =====');
   if (errors.length) { console.log('\n捕获到的错误：'); errors.slice(0, 10).forEach((e) => console.log('  - ' + e)); }
