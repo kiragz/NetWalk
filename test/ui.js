@@ -187,19 +187,6 @@ const shown = (id) => $(id).classList.contains('show');
   const lastPt = FAKE_TRACK[FAKE_TRACK.length - 1];
   ok('从上次结束位置继续（日志可见）', $('logList').textContent.indexOf('从上次结束位置继续') >= 0);
 
-  // C-1：断网自动暂停 / 联网自动继续（0.9.19）
-  console.log('\n== C-1. 断网自动暂停 ==');
-  ok('btnPause 初始为「暂停」', $('btnPause').textContent === '暂停', $('btnPause').textContent);
-  win.dispatchEvent(new win.Event('offline'));
-  await sleep(120);
-  ok('断网后自动暂停（按钮变「继续」）', $('btnPause').textContent === '继续', $('btnPause').textContent);
-  ok('断网提示条出现', $('netBanner').classList.contains('show'));
-  ok('日志说明断网暂停原因', $('logList').textContent.indexOf('已自动暂停漫游') >= 0);
-  win.dispatchEvent(new win.Event('online'));
-  await sleep(120);
-  ok('联网后自动继续（按钮回到「暂停」）', $('btnPause').textContent === '暂停', $('btnPause').textContent);
-  ok('联网后提示条隐藏', !$('netBanner').classList.contains('show'));
-
   // C-2：区域修复（框选 → 只修框内）
   console.log('\n== C-2. 区域轨迹修复 ==');
   ok('btnRepairArea 按钮存在', !!$('btnRepairArea'));
@@ -868,6 +855,19 @@ const shown = (id) => $(id).classList.contains('show');
   ok('本机已有轨迹时不再弹同步提示', !shown('maskSyncFirst') && $('btnStart').disabled === true);
   $('btnEnd').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
   await sleep(400);
+
+  // C-1（移到此处）：断网自动结束行程（放在最后，不影响前面的行走状态测试）
+  console.log('\n== C-1. 断网自动结束行程 ==');
+  $('btnStart').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(400);
+  win.dispatchEvent(new win.Event('offline'));
+  await sleep(300);
+  ok('断网后行程已结束（btnStart 恢复可点）', $('btnStart').disabled === false);
+  ok('断网提示条出现', $('netBanner').classList.contains('show'));
+  ok('日志说明断网结束原因', $('logList').textContent.indexOf('已自动结束行程') >= 0);
+  win.dispatchEvent(new win.Event('online'));
+  await sleep(200);
+  ok('联网后提示条隐藏', !$('netBanner').classList.contains('show'));
 
   console.log('\n===== UI 测试结果：' + pass + ' 通过 / ' + fail + ' 失败 =====');
   if (errors.length) { console.log('\n捕获到的错误：'); errors.slice(0, 10).forEach((e) => console.log('  - ' + e)); }

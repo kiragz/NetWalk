@@ -115,7 +115,6 @@
     engine: null,
     ws: null,
     started: false,
-    autoPausedByNet: false,   // 断网自动暂停标记（恢复联网后自动继续）
     lastMail: null,           // 上次「结束漫游」的自动发信结果 { ok, to, error }
     syncPromptDone: false,    // 本次会话是否已问过「要不要先同步存档」
     poiTimer: null,           // 地点收集定时器
@@ -761,8 +760,6 @@
       let msg;
       try { msg = JSON.parse(ev.data); } catch (_) { return; }
       if (msg.type !== 'tick') return;
-      // 连上服务端（收到 tick）说明连接已恢复 → 解除断网自动暂停
-      if (state.autoPausedByNet) autoResumeForNet();
       state.netAvailable = Boolean(msg.net && msg.net.available);
       state.keyMode = (msg.key && msg.key.mode) || 'none';
       el.pillNet.textContent = state.netAvailable
@@ -781,7 +778,7 @@
       el.pillNet.textContent = '连接中断，重连中';
       el.pillNet.className = 'pill warn';
       // 与服务端断开时无法写入轨迹 → 一律自动暂停（恢复后自动继续）
-      autoPauseForNet('与服务端连接中断');
+      autoEndForNet('与服务端连接中断');
       setTimeout(connectWs, 2500);
     };
     ws.onerror = () => { try { ws.close(); } catch (_) { /* noop */ } };
@@ -917,6 +914,9 @@
 
   async function startWalk() {
     if (!state.provider) return;
+    // 断网时禁止出发（防循环：出发→断网→自动结束→再出发）
+    if (navigator.onLine === false) { log('⚠ 当前无网络，无法规划路线。请联网后再出发'); return; }
+
     // 新设备忘了同步：本机没有任何轨迹但配了邮箱存档 → 先问一句
     if (await shouldPromptSyncFirst()) { openSyncPrompt(); return; }
     await pullArchiveFromMailbox();
@@ -939,7 +939,7 @@
       onRoll: onEngineRoll,
       onLog: log,
       // 连续 3 次路线规划失败（多为断网）→ 自动暂停，避免继续走出不贴路的直线段
-      onPlanUnavailable: () => autoPauseForNet('路线规划连续失败（网络似乎不可用）'),
+      onPlanUnavailable: () => autoEndForNet('路线规划连续失败（网络似乎不可用）'),
     });
 
     if (resume) {
@@ -1052,36 +1052,22 @@
     if (el.netBanner) el.netBanner.classList.remove('show');
   }
 
-  function autoPauseForNet(reason) {
-    if (!state.started) return;
-    state.autoPausedByNet = true;
-    if (!state.engine || state.engine.isPaused()) return;
-    state.engine.pause();
-    if (el.btnPause) el.btnPause.textContent = '继续';
-    log(`⚠ ${reason}，已自动暂停漫游 —— 断网时继续走无法规划路线，会走出不贴路的轨迹。恢复联网后会自动继续。`);
-    showNetBanner(`⚠ ${reason} · 已自动暂停，联网后自动继续`);
-  }
-
-  function autoResumeForNet() {
-    if (!state.autoPausedByNet) return;
-    if (!state.started) { state.autoPausedByNet = false; return; }
-    if (navigator.onLine === false) return;   // 还没恢复
-    state.autoPausedByNet = false;
-    if (state.engine && state.engine.isPaused()) {
-      state.engine.resume();
-      if (el.btnPause) el.btnPause.textContent = '暂停';
-    }
-    log('✅ 网络已恢复，自动继续漫游');
-    hideNetBanner();
+  /** 断网 → 直接结束行程（联网后手动重新出发即可，存档码已有最新数据） */
+  function autoEndForNet(reason) {
+    if (!state.started || state.netEndInProgress) return;
+    state.netEndInProgress = true;
+    log(`⚠ ${reason} —— 已自动结束行程。断网时无法规划路线会走出不贴路的轨迹；联网后重新出发即可（存档码里已有最新数据）`);
+    showNetBanner(`⚠ ${reason} · 已自动结束行程，联网后重新出发`);
+    endWalk().catch(() => {}).finally(() => { state.netEndInProgress = false; });
   }
 
   function initNetWatch() {
-    window.addEventListener('offline', () => autoPauseForNet('检测到本机网络已断开'));
-    window.addEventListener('online', () => autoResumeForNet());
+    window.addEventListener('offline', () => autoEndForNet('检测到本机网络已断开'));
+    window.addEventListener('online', () => { hideNetBanner(); log('✅ 网络已恢复，可以重新出发'); });
     // 兜底轮询：某些断网场景不触发 offline 事件（如只断外网、网卡还在）
     setInterval(() => {
       if (!state.started) return;
-      if (navigator.onLine === false) autoPauseForNet('检测到本机网络已断开');
+      if (navigator.onLine === false) autoEndForNet('检测到本机网络已断开');
     }, 5000);
   }
 
@@ -2434,7 +2420,6 @@
     }
     // 手动暂停/继续：用户的意图优先，清掉断网自动暂停标记（避免联网后又被自动恢复）
     if (el.btnPause) {
-      el.btnPause.addEventListener('click', () => { state.autoPausedByNet = false; hideNetBanner(); });
     }
     // 注：全局「轨迹整备」已移除（会把小路整成直线）——改用「🩹 区域修复」按需修复
     el.statsTabs.addEventListener('click', (e) => {
