@@ -217,8 +217,17 @@ p.planRoute(from, { lat: far.lat, lng: far.lng }).then(async (route) => {
   ok(shareTxt.includes('#NetWalk'), '分享文案含话题标签');
   ok(shareMod.fmtBytes(1536) === '1.5 KB', '字节格式化正确', shareMod.fmtBytes(1536));
 
-  console.log('\n== 10. 老板键判定 ==');
-  const { parseBossEnv, normalizeBoss, isBossEvent, KEYS } = require('./bosskey');
+  console.log('\n== 9.5 高德诊断判定（换电脑加载失败排查） ==');
+  const { classifyAmapProbe } = require('./amapcheck.js');
+  ok(classifyAmapProbe({ keyed: false }).indexOf('没有配置高德 Key') >= 0, '无 Key → 提示去配置/同步');
+  ok(classifyAmapProbe({ keyed: true, reachable: false, error: 'timeout', ms: 8000 }).indexOf('*.amap.com 设为直连') >= 0,
+    '网络不通 → 提示代理直连');
+  ok(classifyAmapProbe({ keyed: true, reachable: true, ms: 200, keyRejected: true }).indexOf('Web端(JS API)') >= 0,
+    'Key 被拒 → 提示服务类型/白名单');
+  ok(classifyAmapProbe({ keyed: true, reachable: true, ms: 285 }).indexOf('浏览器') >= 0,
+    '一切正常 → 指向浏览器侧（代理/扩展/安全密钥）');
+
+  console.log('\n== 10. 老板键判定 ==');  const { parseBossEnv, normalizeBoss, isBossEvent, KEYS } = require('./bosskey');
   const def = parseBossEnv({});
   ok(def.enabled === true && def.key === 67, '老板键默认 F9(67) 且启用', def.key);
   ok(parseBossEnv({ NETWALK_BOSS_ENABLED: '0' }).enabled === false, '可用环境变量关闭老板键');

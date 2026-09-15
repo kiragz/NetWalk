@@ -29,8 +29,13 @@
       const s = document.createElement('script');
       s.src = `${SDK}?v=2.0&key=${encodeURIComponent(key)}`;
       s.async = true;
-      s.onload = () => (global.AMap ? loadPlugins(global.AMap) : reject(new Error('高德 SDK 加载失败')));
-      s.onerror = () => reject(new Error('高德 SDK 加载失败，请检查网络或 Key 配置'));
+      // 超时兜底：网络被代理/防火墙拦掉时 onerror 不一定触发，会让页面一直「加载中」
+      const timer = setTimeout(() => {
+        reject(new Error('高德 SDK 加载超时（12 秒）—— 网络可能被代理/防火墙拦截'));
+      }, 12000);
+      const done = (fn) => { clearTimeout(timer); fn(); };
+      s.onload = () => done(() => (global.AMap ? loadPlugins(global.AMap) : reject(new Error('高德 SDK 加载失败（脚本已返回但未挂载 AMap）'))));
+      s.onerror = () => done(() => reject(new Error('高德 SDK 加载失败 —— 到不了 webapi.amap.com（网络/代理问题，或 Key 被高德拒绝）')));
       document.head.appendChild(s);
     });
   }

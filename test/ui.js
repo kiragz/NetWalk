@@ -140,6 +140,9 @@ win.fetch = function (url, opt) {
     return json({ ok: true, added: 2 });
   }
   if (u.indexOf('/api/places') === 0) return json({ ok: true, days: [] });
+  if (u.indexOf('/api/amapcheck') === 0) {
+    return json({ ok: true, keyed: true, reachable: false, status: 0, ms: 1200, keyRejected: false, error: 'timeout', hint: '服务端直连高德失败（timeout）→ 检查代理是否把 *.amap.com 走了境外' });
+  }
   if (u.indexOf('/api/mapkey') === 0) return json({ ok: true, key: '' });
   return json({ ok: true });
 };
@@ -917,6 +920,26 @@ const shown = (id) => $(id).classList.contains('show');
   D.state.started = false;
   D.state.provider = null;
   D.state.engine = null;
+
+  // S：高德加载失败提示条（换电脑场景）
+  console.log('\n== S. 高德加载失败提示条 ==');
+  ok('提示条默认隐藏', !shown('mapBanner'));
+  D.showMapBanner('⚠ 高德地图加载失败：测试');
+  ok('可显示失败提示', shown('mapBanner') && $('mapBannerText').textContent.indexOf('高德地图加载失败') >= 0,
+    $('mapBannerText').textContent);
+  $('btnMapDiag').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(150);
+  ok('诊断写入日志结论', $('logList').textContent.indexOf('结论') >= 0);
+  ok('诊断能区分网络与 Key（日志含直连结果）', $('logList').textContent.indexOf('本机直连 webapi.amap.com') >= 0);
+  ok('诊断结果回写到提示条', $('mapBannerText').textContent.indexOf('直连高德失败') >= 0, $('mapBannerText').textContent);
+  $('btnMapSettings').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(60);
+  ok('点「设置」打开设置弹窗', shown('maskSettings'));
+  ok('打开设置会回填 Key 表单（防误清）', ($('cfgKey') ? $('cfgKey').placeholder.indexOf('已配置') >= 0 || $('cfgKey').placeholder.indexOf('演练') >= 0 : false),
+    $('cfgKey') ? $('cfgKey').placeholder : '无元素');
+  $('btnMapDismiss').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(40);
+  ok('点 ✕ 关闭提示条', !shown('mapBanner'));
 
   console.log('\n===== UI 测试结果：' + pass + ' 通过 / ' + fail + ' 失败 =====');
   if (errors.length) { console.log('\n捕获到的错误：'); errors.slice(0, 10).forEach((e) => console.log('  - ' + e)); }

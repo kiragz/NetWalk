@@ -104,6 +104,7 @@
     maskSyncFirst: $('maskSyncFirst'), btnSyncFirstGo: $('btnSyncFirstGo'), btnSyncFirstSkip: $('btnSyncFirstSkip'), syncFirstHint: $('syncFirstHint'),
     btnRepairArea: $('btnRepairArea'), btnRepairGo: $('btnRepairGo'), btnRepairCancel: $('btnRepairCancel'),
     repairInfo: $('repairInfo'), repairBar: $('repairBar'), pickBox: $('pickBox'), netBanner: $('netBanner'),
+    mapBanner: $('mapBanner'), mapBannerText: $('mapBannerText'), btnMapRetry: $('btnMapRetry'), btnMapDiag: $('btnMapDiag'), btnMapSettings: $('btnMapSettings'), btnMapDismiss: $('btnMapDismiss'),
     btnRgLogin: $('btnRgLogin'),
     btnSecClear: $('btnSecClear'), secHint: $('secHint'),
     mVisited: $('mVisited'), mLit: $('mLit'),
@@ -620,6 +621,9 @@
       pickFormalPois,
       normalizePlace,
       collectPlacesNow,
+      showMapBanner,
+      hideMapBanner,
+      runAmapDiag,
       backfillDay,
       repairArea,
       loadAllDays,
@@ -718,7 +722,13 @@
       el.rowAmap.style.display = 'none';
       el.pillMap.textContent = '演练路网（虚构）';
       el.pillMap.className = 'pill warn';
-      log(`演练模式已就绪${err && err.message && err.message !== 'no amap key' ? '（' + err.message + '）' : ''}`);
+      const why = err && err.message && err.message !== 'no amap key' ? err.message : '';
+      log(`演练模式已就绪${why ? '（' + why + '）' : ''}`);
+      // 配了 Key 却加载不出高德 → 明确告诉用户并给出可点的下一步（换电脑最常见）
+      if (why) {
+        showMapBanner(`⚠ 高德地图加载失败：${why}　现用演练路网，可正常行走。`);
+        log('　可点提示条上的「🔍 诊断」查清是网络还是 Key 的问题；修好后点「🔄 重试」。');
+      }
     }
   }
 
@@ -748,6 +758,7 @@
     el.pillMap.className = 'pill warn';
     log('⚠ 高德地图 8 秒内未完成首次渲染');
     log('　请检查：① Key 是否已启用「Web 端 (JS API)」服务　② 控制台若要求安全密钥，请在设置里补填');
+    showMapBanner('⚠ 高德脚本已加载，但地图 8 秒未出图 —— 多半是 Key 服务类型不对或缺安全密钥。');
   }
 
   // ---------- WebSocket ----------
@@ -1055,6 +1066,36 @@
 
   function hideNetBanner() {
     if (el.netBanner) el.netBanner.classList.remove('show');
+  }
+
+  /** 高德加载失败提示条（带 重试 / 诊断 / 设置 按钮） */
+  function showMapBanner(text) {
+    if (!el.mapBanner) return;
+    if (el.mapBannerText) el.mapBannerText.textContent = text;
+    el.mapBanner.classList.add('show');
+  }
+  function hideMapBanner() {
+    if (el.mapBanner) el.mapBanner.classList.remove('show');
+  }
+
+  /** 高德加载失败诊断：分清「网络到不了高德」还是「Key 被高德拒绝」 */
+  async function runAmapDiag() {
+    log('🔍 正在诊断高德连通性…');
+    let d = null;
+    try {
+      d = await fetch('/api/amapcheck').then((r) => r.json());
+    } catch (e) {
+      log('诊断失败：' + ((e && e.message) || e));
+      return;
+    }
+    if (!d) { log('诊断没有返回结果'); return; }
+    log(`　Key 已配置：${d.keyed ? '是' : '否'}`);
+    if (d.keyed) {
+      log(`　本机直连 webapi.amap.com：${d.reachable ? '通（' + d.ms + 'ms，HTTP ' + d.status + '）' : '不通（' + (d.error || '超时') + '）'}`);
+      if (d.reachable) log(`　高德是否拒绝该 Key：${d.keyRejected ? '是（Key 无效/类型不对/被限流）' : '否'}`);
+    }
+    log('　结论：' + (d.hint || '无'));
+    showMapBanner('🔍 ' + (d.hint || '诊断完成，详见日志'));
   }
 
   /** 断网 → 直接结束行程（联网后手动重新出发即可，存档码已有最新数据） */
@@ -2441,6 +2482,24 @@
     el.btnStats.addEventListener('click', openStats);
     el.btnAlbum.addEventListener('click', openAlbum);
     if (el.btnAlbumQuick) el.btnAlbumQuick.addEventListener('click', openAlbum);   // 主面板「复制码/分享」之间的直达按钮
+
+    // 高德加载失败提示条：重试 / 诊断 / 设置 / 关闭
+    if (el.btnMapRetry) el.btnMapRetry.addEventListener('click', async () => {
+      el.btnMapRetry.disabled = true;
+      hideMapBanner();
+      log('🔄 重新加载高德地图…');
+      try { await initProvider((state.engine && state.engine.pos) || state.origin); }
+      finally { el.btnMapRetry.disabled = false; }
+    });
+    if (el.btnMapDiag) el.btnMapDiag.addEventListener('click', () => { runAmapDiag().catch(() => {}); });
+    if (el.btnMapSettings) el.btnMapSettings.addEventListener('click', () => {
+      hideMapBanner();
+      if (el.maskSettings) el.maskSettings.classList.add('show');
+      renderOriginFields();
+      loadMailForm();
+      loadKeyForm();   // 回填 Key / 安全密钥，避免用户以为没保存
+    });
+    if (el.btnMapDismiss) el.btnMapDismiss.addEventListener('click', hideMapBanner);
     el.btnAlbumClose.addEventListener('click', () => { if (el.maskAlbum) el.maskAlbum.classList.remove('show'); });
     if (el.albumTabs) el.albumTabs.addEventListener('click', (e) => {
       const btn = e.target.closest && e.target.closest('.ach-tab');

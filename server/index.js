@@ -3,6 +3,7 @@
  * 职责：采集真实网速/击键 → WebSocket 推送；接收前端轨迹并落盘；生成日报。
  */
 const http = require('http');
+const https = require('https');
 const path = require('path');
 const fs = require('fs');
 const express = require('express');
@@ -14,6 +15,7 @@ const { TrackStore, todayStr } = require('./store');
 const { AchievementStore } = require('./achievements');
 const { exportArchive, importArchive, decodeArchive, pickCarryConfig } = require('./archive');
 const mailbox = require('./mailbox');
+const { classifyAmapProbe } = require('./amapcheck');
 const { staticMiddleware } = require('./static');
 const { IS_PACKAGED, APP_ROOT, DATA_DIR, PUBLIC_DIR } = require('./paths');
 const { ensurePublic } = require('./webassets');
@@ -276,6 +278,43 @@ app.get('/api/mapkey', (req, res) => {
     securityJsCode: config.amapSecurityJsCode || '',
     provider: config.provider,
   });
+});
+
+/**
+ * 高德加载失败诊断
+ * 换电脑后「高德 SDK 加载失败」时，这个接口能分清是「本机网络到不了高德」
+ * 还是「网络通、但 Key 被高德拒绝」，避免用户瞎猜。
+ */
+app.get('/api/amapcheck', async (req, res) => {
+  const key = String(config.amapKey || '').trim();
+  const out = { ok: true, keyed: Boolean(key), reachable: false, status: 0, ms: 0, keyRejected: false, hint: '' };
+  if (!key) {
+    out.hint = classifyAmapProbe(out);
+    return res.json(out);
+  }
+  const url = `https://webapi.amap.com/maps?v=2.0&key=${encodeURIComponent(key)}`;
+  const t0 = Date.now();
+  try {
+    const r = await new Promise((resolve, reject) => {
+      const rq = https.get(url, { timeout: 8000, headers: { 'User-Agent': 'NetWalk-selfcheck' } }, (rs) => {
+        let buf = '';
+        rs.setEncoding('utf8');
+        rs.on('data', (c) => { buf += c; if (buf.length > 40000) { rq.destroy(); resolve({ status: rs.statusCode, buf }); } });
+        rs.on('end', () => resolve({ status: rs.statusCode, buf }));
+      });
+      rq.on('timeout', () => { rq.destroy(new Error('timeout')); });
+      rq.on('error', reject);
+    });
+    out.reachable = true;
+    out.status = r.status;
+    out.ms = Date.now() - t0;
+    out.keyRejected = /INVALID_USER_KEY|USERKEY_PLAT_NOMATCH|INVALID_USER_SCODE|USER_DAILY_QUERY_OVER_LIMIT/.test(r.buf);
+  } catch (e) {
+    out.ms = Date.now() - t0;
+    out.error = (e && e.message) || String(e);
+  }
+  out.hint = classifyAmapProbe(out);
+  res.json(out);
 });
 
 app.post('/api/config', (req, res) => {
