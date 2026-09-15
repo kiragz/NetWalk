@@ -377,7 +377,7 @@
         const timer = setTimeout(() => finish([]), 8000);
         try {
           const c = new this.AMap.LngLat(pos.lng, pos.lat);
-          this.placeSearch.searchNearBy('', c, 200, (status, result) => {
+          this.placeSearch.searchNearBy('', c, 100, (status, result) => {
             clearTimeout(timer);
             if (status !== 'complete' || !result || !result.poiList || !result.poiList.pois) return finish([]);
             finish(result.poiList.pois);

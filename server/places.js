@@ -51,6 +51,8 @@ class PlaceStore {
       const item = { name, cat, lat: Number(lat.toFixed(6)), lng: Number(lng.toFixed(6)), t: Math.round(t) };
       const road = String((p && p.road) || '').trim().slice(0, 30);
       if (road) item.road = road;   // 所在路名（收集册按路分组用，可选）
+      const dist = Number(p && p.dist);
+      if (Number.isFinite(dist) && dist >= 0 && dist <= 99999) item.dist = Math.round(dist);   // 到路的距离（米，100 米口径）
       list.push(item);
       added++;
     }

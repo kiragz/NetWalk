@@ -1531,7 +1531,7 @@
         });
         const groupHtml = entries.map(([road, places]) => [
           `<div style="margin:8px 0 2px;padding:3px 8px;background:var(--bg-dim,rgba(127,127,127,.12));border-left:3px solid var(--accent,#7c6cf0);border-radius:4px;font-weight:700;display:flex;justify-content:space-between;align-items:center"><span>🛣️ ${road}</span><span style="opacity:.6;font-weight:400">${places.length} 个</span></div>`,
-          places.map((p) => `<div style="padding:2px 0 2px 18px;display:flex;justify-content:space-between;align-items:center;gap:8px"><span style="color:var(--txt-dim)">${albumCatIcon(p.cat)} <b style="color:var(--txt)">${p.name}</b> <span style="opacity:.7">· ${p.cat}</span></span><span class="album-del" data-date="${d.date}" data-name="${p.name}" title="从收集册删除" style="cursor:pointer;opacity:.45;font-weight:700">✕</span></div>`).join(''),
+          places.map((p) => `<div style="padding:2px 0 2px 18px;display:flex;justify-content:space-between;align-items:center;gap:8px"><span style="color:var(--txt-dim)">${albumCatIcon(p.cat)} <b style="color:var(--txt)">${p.name}</b> <span style="opacity:.7">· ${p.cat}${Number.isFinite(p.dist) ? ' · ' + p.dist + 'm' : ''}</span></span><span class="album-del" data-date="${d.date}" data-name="${p.name}" title="从收集册删除" style="cursor:pointer;opacity:.45;font-weight:700">✕</span></div>`).join(''),
         ].join('')).join('');
         return `<div style="margin:10px 0 4px;font-weight:700;display:flex;justify-content:space-between;align-items:center"><span>📅 ${d.date} · ${d.places.length} 个 · ${entries.length} 条路</span><button class="btn sm" data-backfill="${d.date}" title="沿这天的实际轨迹按类别搜索，补录漏掉的正式地点" style="padding:2px 8px">↺ 重溯补采</button></div>` + groupHtml;
       }).join('') || '<div class="hint">暂无记录</div>';
@@ -1640,60 +1640,69 @@
     }
   }
 
-  /** 重溯补采：沿某天实际轨迹每 ~200m 逆地理一次，把漏掉的正式地点补进当天的收集册 */
+  /** 重溯补采：按当天走过的每条路搜索，只收「路两侧 100 米内」的正式场所（对齐周边设施口径，拒绝包围盒式的宽泛统计） */
   async function backfillDay(date) {
     if (!state.provider || state.provider.name !== 'amap') { log('⚠ 补采需要高德模式（在线）'); return; }
     const day = (await loadAllDays()).find((d) => d.date === date);
     const path = (day && day.path) || [];
     if (path.length < 2) { log(`${date} 没有轨迹可补采`); return; }
-    // 沿轨迹的包围盒，按正式类别批量 PlaceSearch（一次搜一批，不是逐点调）
-    const lats = path.map((p) => p.lat), lngs = path.map((p) => p.lng);
-    const pad = 0.002;
-    const bounds = new window.AMap.Bounds(
-      [Math.min(...lngs) - pad, Math.min(...lats) - pad],
-      [Math.max(...lngs) + pad, Math.max(...lats) + pad]
-    );
-    const cats = ['医院', '中学', '小学', '大学', '图书馆', '博物馆', '政府机关', '车站', '体育场馆', '地标景点'];
-    const AMAP_TYPES = {
-      '医院': '医疗保健服务', '中学': '中学', '小学': '小学', '大学': '高等院校',
-      '图书馆': '图书馆', '博物馆': '博物馆|展览馆|纪念馆',
-      '政府机关': '政府机关及社会团体', '车站': '火车站|地铁站',
-      '体育场馆': '体育休闲服务|体育场馆', '地标景点': '风景名胜|标志性建筑',
-    };
+
+    // ① 按路名分组轨迹点（每条路一个点集）
+    const roadPts = new Map();
+    for (const q of path) {
+      const r = String(q.road || '').trim();
+      if (!r) continue;
+      if (!roadPts.has(r)) roadPts.set(r, []);
+      roadPts.get(r).push(q);
+    }
+    const roads = [...roadPts.keys()].sort((a, b) => roadPts.get(b).length - roadPts.get(a).length);
+    if (!roads.length) { log(`${date} 轨迹没有路名信息，无法按路补采`); return; }
+
+    // ② 每条路搜一次（合并全部正式类别，避免逐类×逐路爆调用量），结果只留 100 米内的
+    const ALL_TYPES = '医疗保健服务|中学|小学|高等院校|图书馆|博物馆|展览馆|纪念馆|政府机关及社会团体|火车站|地铁站|体育休闲服务|风景名胜|标志性建筑';
+    const NEAR_M = 100;
+    const CALL_CAP = 45;
     const found = new Map();
     let calls = 0;
-    log(`↺ ${date} 重溯补采中… 按 ${cats.length} 类搜索沿途正式地点`);
-    for (const cat of cats) {
-      if (calls >= 15) break;   // 上限 15 次搜索（10 类以内够用）
+    log(`↺ ${date} 按路补采：${roads.length} 条路 · 只收路两侧 ${NEAR_M} 米内的正式场所`);
+    for (const road of roads) {
+      if (calls >= CALL_CAP) { log(`  （已达 ${CALL_CAP} 次搜索上限，剩余 ${roads.length - roads.indexOf(road)} 条路未搜，可再点一次补采）`); break; }
+      const pts = roadPts.get(road);
+      const lats = pts.map((p) => p.lat), lngs = pts.map((p) => p.lng);
+      const pad = 0.0005;
+      const bounds = new window.AMap.Bounds(
+        [Math.min(...lngs) - pad, Math.min(...lats) - pad],
+        [Math.max(...lngs) + pad, Math.max(...lats) + pad]
+      );
       calls++;
+      let pois = [];
       try {
         const result = await Promise.race([
-          state.provider.searchFormalInBounds(bounds, AMAP_TYPES[cat] || cat),
+          state.provider.searchFormalInBounds(bounds, ALL_TYPES),
           new Promise((r2) => setTimeout(() => r2([]), 10000)),
         ]);
-        const pois = (result && result.poiList && result.poiList.pois) || [];
-        for (const poi of pois) {
-          const name = String(poi.name || '').trim();
-          if (!name || found.has(name)) continue;
-          const loc = poi.location || {};
-          found.set(name, {
-            name: name.slice(0, 60), cat,
-            lat: Number(loc.lat) || 0, lng: Number(loc.lng) || 0,
-            t: Date.now(),
-          });
+        pois = (result && result.poiList && result.poiList.pois) || (Array.isArray(result) ? result : []);
+      } catch (_) { pois = []; }
+      let kept = 0;
+      for (const poi of pois) {
+        const name = String(poi.name || '').trim();
+        const cat = poiCat(poi.type);
+        if (!name || !cat) continue;
+        const loc = poi.location || {};
+        const lat = Number(loc.lat), lng = Number(loc.lng);
+        if (!Number.isFinite(lat) || !Number.isFinite(lng)) continue;
+        // 到这条路轨迹点的最近距离（米）；超过 100 米的不要 —— 这就是「100 米口径」
+        let bestM = Infinity;
+        for (const q of pts) {
+          const d = haversineKm(q, { lat, lng }) * 1000;
+          if (d < bestM) bestM = d;
         }
-        log(`  ${CAT_ICONS[cat] || '📍'} ${cat}: ${pois.length} 个`);
-      } catch (_) { /* 单类失败不影响其他类 */ }
-    }
-    // 给每个地点标注最近轨迹点的路名（收集册按路分组；纯坐标计算，不耗 API）
-    for (const p of found.values()) {
-      let best = null, bestD = Infinity;
-      for (const q of path) {
-        const d = (q.lat - p.lat) * (q.lat - p.lat) + (q.lng - p.lng) * (q.lng - p.lng);
-        if (d < bestD) { bestD = d; best = q; }
+        if (bestM > NEAR_M) continue;
+        if (found.has(name)) { found.get(name).dist = Math.min(found.get(name).dist, Math.round(bestM)); continue; }
+        found.set(name, { name: name.slice(0, 60), cat, lat, lng, road, dist: Math.round(bestM), t: Date.now() });
+        kept++;
       }
-      const r = best && String(best.road || '').trim();
-      if (r) p.road = r.slice(0, 30);
+      if (kept) log(`  🛣️ ${road}: ${kept} 个（100 米内）`);
     }
     const list = [...found.values()].map((p) => ({ ...p, t: Date.now() }));
     if (!list.length) { log(`↺ ${date} 沿途没有发现正式场所`); return; }
