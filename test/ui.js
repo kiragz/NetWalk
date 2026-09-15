@@ -107,6 +107,7 @@ let TRACK_RANGE_DAYS = [];                                                     /
 let MAIL_STUB = { ok: true, to: '172805132@qq.com', error: '' };   // 模拟服务端「结束自动发信」的结果
 const calls = [];
 const postBodies = [];   // 记录 /api/config 的 POST 载荷，用于校验出发点配置
+const PLACES_POSTS = [];   // 记录 /api/places/add 的载荷（收集册实时采集测试用）
 win.fetch = function (url, opt) {
   const u = String(url);
   calls.push((opt && opt.method ? opt.method : 'GET') + ' ' + u);
@@ -134,6 +135,11 @@ win.fetch = function (url, opt) {
   if (u.indexOf('/api/session/end') === 0) return json({ ok: true, date: TODAY, achievements: { newly: ['dist_5k'], unlocked: {}, total: 36, got: 5 }, mail: MAIL_STUB });
   if (u.indexOf('/api/session/') === 0) return json({ ok: true, date: TODAY, achievements: { newly: ['dist_5k'], unlocked: {}, total: 36, got: 5 } });
   if (u.indexOf('/api/report/') === 0) return json({ ok: true, url: '/reports/netwalk-' + TODAY + '.html' });
+  if (u.indexOf('/api/places/add') === 0) {
+    try { PLACES_POSTS.push(JSON.parse(opt.body || '{}')); } catch (_) { PLACES_POSTS.push(null); }
+    return json({ ok: true, added: 2 });
+  }
+  if (u.indexOf('/api/places') === 0) return json({ ok: true, days: [] });
   if (u.indexOf('/api/mapkey') === 0) return json({ ok: true, key: '' });
   return json({ ok: true });
 };
@@ -869,6 +875,48 @@ const shown = (id) => $(id).classList.contains('show');
   win.dispatchEvent(new win.Event('online'));
   await sleep(200);
   ok('联网后提示条隐藏', !$('netBanner').classList.contains('show'));
+
+  // R：收集册随走过的路实时采集（v0.9.37）
+  console.log('\n== R. 收集册按路实时采集 ==');
+  const D = win.NetWalkDebug;
+  D.state.provider = ap;                       // 换成高德 mock provider
+  ap.placeSearch.searchNearBy = (k, c, r, cb) => cb('complete', {
+    poiList: {
+      pois: [
+        { name: '广州东站地铁站F口', type: '交通设施服务;地铁站', location: new AMapMock.LngLat(114.0579, 22.5431) },
+        { name: '乐刻运动健身(华景新城店)', type: '体育休闲服务;运动场馆;健身中心', location: new AMapMock.LngLat(114.0579, 22.5431) },
+        { name: '测试人民医院', type: '医疗保健服务;综合医院', location: new AMapMock.LngLat(114.0579, 22.5431) },
+        { name: '南方医院', type: '医疗保健服务;综合医院', location: new AMapMock.LngLat(114.0579, 22.5431) },
+      ],
+    },
+  });
+  ap._ready = true;                             // 模拟地图已就绪
+  D.state.started = true;
+  D.state.engine = { pos: { lat: 22.5431, lng: 114.0579 }, road: '东站路' };
+  PLACES_POSTS.length = 0;
+  await D.collectPlacesNow(true);
+  await sleep(80);
+  const sent = PLACES_POSTS[PLACES_POSTS.length - 1];
+  ok('采集会上报服务端', PLACES_POSTS.length >= 1, 'n=' + PLACES_POSTS.length);
+  ok('上报地点带所在路名', !!sent && sent.places.length > 0 && sent.places.every((p) => p.road === '东站路'),
+    sent ? JSON.stringify(sent.places.map((p) => p.road)) : '无');
+  ok('车站只留站名（出口已去掉）', !!sent && sent.places.some((p) => p.name === '广州东站'),
+    sent ? sent.places.map((p) => p.name).join('、') : '无');
+  ok('健身房等商业设施被过滤', !!sent && !sent.places.some((p) => /健身/.test(p.name)),
+    sent ? sent.places.map((p) => p.name).join('、') : '无');
+  ok('日志显示收集到的地点', $('logList').textContent.indexOf('📔 收集到') >= 0);
+  // 换路触发采集：road 变化 → 立即采一次
+  PLACES_POSTS.length = 0;
+  D.state.engine.road = '林和中路';
+  D.state.lastCollectAt = 0;
+  await D.collectPlacesNow(true);
+  await sleep(80);
+  const sent2 = PLACES_POSTS[PLACES_POSTS.length - 1];
+  ok('换到新路后采集归属新路名', !!sent2 && sent2.places.every((p) => p.road === '林和中路'),
+    sent2 ? JSON.stringify(sent2.places.map((p) => p.road)) : '无');
+  D.state.started = false;
+  D.state.provider = null;
+  D.state.engine = null;
 
   console.log('\n===== UI 测试结果：' + pass + ' 通过 / ' + fail + ' 失败 =====');
   if (errors.length) { console.log('\n捕获到的错误：'); errors.slice(0, 10).forEach((e) => console.log('  - ' + e)); }

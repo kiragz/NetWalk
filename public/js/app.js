@@ -120,6 +120,8 @@
     poiTimer: null,           // 地点收集定时器
     albumRange: 'all',        // 收集册显示范围：all / day
     lastCollectPos: null,     // 上次采集位置（避免原地重复采）
+    lastRoad: '',             // 上一条走过的路（换路时立即采集）
+    lastCollectAt: 0,         // 上次采集时间（换路触发的限流）
     netAvailable: false,
     keyMode: 'none',
     channel: ('BroadcastChannel' in window) ? new BroadcastChannel('netwalk') : null,
@@ -616,6 +618,8 @@
       resetSyncPrompt() { state.syncPromptDone = false; },
       poiCat,
       pickFormalPois,
+      normalizePlace,
+      collectPlacesNow,
       backfillDay,
       repairArea,
       loadAllDays,
@@ -1480,14 +1484,18 @@
     return out;
   }
 
-  async function collectPlacesNow() {
+  /** 采集一次：以当前位置搜路两侧 100 米内的正式场所，归到当前所在路名下 */
+  async function collectPlacesNow(force) {
     if (!state.started || !state.provider || state.provider.name !== 'amap') return;
     const pos = (state.engine && state.engine.pos) || null;
     if (!pos || !Number.isFinite(pos.lat)) return;
-    if (state.lastCollectPos) {
+    if (!force && state.lastCollectPos) {
       const moved = haversineKm(state.lastCollectPos, pos) * 1000;
-      if (moved < 150) return;   // 没走出 150 米就不重复采
+      if (moved < 100) return;   // 没走出 100 米就不重复采（换路时会 force 采一次）
     }
+    const now = Date.now();
+    if (force && state.lastCollectAt && now - state.lastCollectAt < 3000) return;   // 换路连续触发时限流
+    state.lastCollectAt = now;
     state.lastCollectPos = { lat: pos.lat, lng: pos.lng };
     const road = (state.engine && state.engine.road) || '';   // 采集时所在路名
     try {
@@ -1496,20 +1504,37 @@
       if (!list.length) return;
       const w = await postJson('/api/places/add', { date: today(), places: list }, 8000);
       if (w && w.added) {
-        log(`📔 收集到 ${w.added} 个正式地点：` + list.slice(0, 3).map((p) => (CAT_ICONS[p.cat] || '📍') + p.name).join('、') + (list.length > 3 ? ' 等' : ''));
+        log(`📔 收集到 ${w.added} 个正式地点` + (road ? `（${road}）` : '') + `：` + list.slice(0, 3).map((p) => (CAT_ICONS[p.cat] || '📍') + p.name).join('、') + (list.length > 3 ? ' 等' : ''));
+        albumCache = null;
+        refreshAlbumIfOpen();   // 收集册正开着就实时刷新
       }
     } catch (_) { /* 采集失败不影响行走 */ }
   }
 
+  /** 收集册开着时原地刷新内容（保留滚动位置） */
+  let albumRefreshBusy = false;
+  async function refreshAlbumIfOpen() {
+    if (albumRefreshBusy) return;
+    if (!el.maskAlbum || !el.maskAlbum.classList.contains('show')) return;
+    albumRefreshBusy = true;
+    const keep = el.albumBody ? el.albumBody.scrollTop : 0;
+    try { await openAlbum(); } catch (_) { /* noop */ } finally {
+      if (el.albumBody) el.albumBody.scrollTop = keep;
+      albumRefreshBusy = false;
+    }
+  }
+
   function startPlaceCollector() {
     stopPlaceCollector();
-    state.poiTimer = setInterval(collectPlacesNow, 45000);
-    setTimeout(collectPlacesNow, 15000);   // 出发后 15 秒先采一次
+    state.poiTimer = setInterval(() => collectPlacesNow(false), 20000);   // 每 20 秒采一次
+    state.lastRoad = '';
+    setTimeout(() => collectPlacesNow(true), 8000);                        // 出发后 8 秒先采一次
   }
 
   function stopPlaceCollector() {
     if (state.poiTimer) { clearInterval(state.poiTimer); state.poiTimer = null; }
     state.lastCollectPos = null;
+    state.lastRoad = '';
   }
 
   // ---------- 地点收集册浮层 ----------
@@ -1598,6 +1623,12 @@
     el.mVisited.textContent = `${s.visited || 0} 条路`;
     el.mLit.textContent = `${s.litCells || 0} 块`;
     updateAmapCalls();
+
+    // 走到新的一条路 → 立刻按这条路采一次地点（收集册实时跟着走的路更新）
+    if (state.started && s.road && s.road !== state.lastRoad) {
+      state.lastRoad = s.road;
+      collectPlacesNow(true);
+    }
 
     const t = s.totals || { rx: 0, tx: 0, keys: 0 };
     el.rxTot.textContent = fmtBpsFull(t.rx);
