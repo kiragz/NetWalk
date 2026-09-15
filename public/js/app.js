@@ -1426,14 +1426,47 @@
     return '';
   }
 
+  /**
+   * 规整地点名/过滤（收集册口径）：
+   * - 车站：只留站名 —— 截到最后一个「站」字，去掉出口/检票口/售票窗等；「X地铁站」归一为「X站」
+   * - 体育场馆：只留真场馆（体育场/游泳/球场等，只看主名），滤掉健身房/瑜伽/电竞等商业设施
+   * 返回规整后的名字，不该收录的返回 ''
+   */
+  function normalizePlace(name, cat) {
+    let n = String(name || '').trim();
+    if (!n) return '';
+    if (cat === '车站') {
+      n = n.replace(/[(（]地铁站[)）)]$/, '地铁站');   // 五山(地铁站) → 五山地铁站
+      const i = n.lastIndexOf('站');
+      if (i < 0) return '';
+      n = n.slice(0, i + 1);                          // 广州东站公安制证窗11 → 广州东站
+      if (/地铁站$/.test(n)) {                         // 广州东站地铁站 → 广州东站；龙口西地铁站 保持
+        const before = n.slice(0, -3);
+        n = before.endsWith('站') ? before : n;
+      }
+      n = n.replace(/站站$/, '站');                    // 兜底：广州东站站 → 广州东站
+      return n.slice(0, 60);
+    }
+    if (cat === '体育场馆') {
+      const core = n.replace(/[(（][^)）]*[)）]$/, '');   // 主名（去掉括号后缀，防止地址里带「体育」误命中）
+      // 真场馆白名单：体育中心/体育场/体育馆/游泳/球场类
+      if (!/(体育|运动场|游泳|泳馆|球场|足球|篮球|网球|羽毛球|乒乓|田径|滑冰|溜冰|武术)/.test(core)) return '';
+      // 商业设施黑名单兜底
+      if (/健身|瑜伽|普拉提|搏击|格斗|泰拳|柔术|射击|高尔夫|电竞|网咖|轮滑|蹦床|密室|桌游|拼豆|陶艺|DIY|会馆|体育会|剧本杀|公馆/.test(n)) return '';
+      return n.slice(0, 60);
+    }
+    return n.slice(0, 60);
+  }
+
   /** 从高德逆地理返回的 POI 里挑出正式场所，并按名称去重；road 为采集时所在路名（可选） */
   function pickFormalPois(pois, pos, road) {
     const out = [];
     const seen = new Set();
     const r = String(road || '').trim().slice(0, 30);
     for (const poi of (pois || [])) {
-      const name = String(poi.name || '').trim();
+      const rawName = String(poi.name || '').trim();
       const cat = poiCat(poi.type);
+      const name = normalizePlace(rawName, cat);
       if (!name || !cat || seen.has(name)) continue;
       seen.add(name);
       const loc = poi.location || {};
@@ -1531,7 +1564,7 @@
         });
         const groupHtml = entries.map(([road, places]) => [
           `<div style="margin:8px 0 2px;padding:3px 8px;background:var(--bg-dim,rgba(127,127,127,.12));border-left:3px solid var(--accent,#7c6cf0);border-radius:4px;font-weight:700;display:flex;justify-content:space-between;align-items:center"><span>🛣️ ${road}</span><span style="opacity:.6;font-weight:400">${places.length} 个</span></div>`,
-          places.map((p) => `<div style="padding:2px 0 2px 18px;display:flex;justify-content:space-between;align-items:center;gap:8px"><span style="color:var(--txt-dim)">${albumCatIcon(p.cat)} <b style="color:var(--txt)">${p.name}</b> <span style="opacity:.7">· ${p.cat}${Number.isFinite(p.dist) ? ' · ' + p.dist + 'm' : ''}</span></span><span class="album-del" data-date="${d.date}" data-name="${p.name}" title="从收集册删除" style="cursor:pointer;opacity:.45;font-weight:700">✕</span></div>`).join(''),
+          places.map((p) => `<div style="padding:2px 0 2px 18px;display:flex;justify-content:space-between;align-items:center;gap:8px"><span style="color:var(--txt-dim)">${albumCatIcon(p.cat)} <b style="color:var(--txt)">${p.name}</b> <span style="opacity:.7">· ${p.cat}</span></span><span class="album-del" data-date="${d.date}" data-name="${p.name}" title="从收集册删除" style="cursor:pointer;opacity:.45;font-weight:700">✕</span></div>`).join(''),
         ].join('')).join('');
         return `<div style="margin:10px 0 4px;font-weight:700;display:flex;justify-content:space-between;align-items:center"><span>📅 ${d.date} · ${d.places.length} 个 · ${entries.length} 条路</span><button class="btn sm" data-backfill="${d.date}" title="沿这天的实际轨迹按类别搜索，补录漏掉的正式地点" style="padding:2px 8px">↺ 重溯补采</button></div>` + groupHtml;
       }).join('') || '<div class="hint">暂无记录</div>';
@@ -1685,8 +1718,9 @@
       } catch (_) { pois = []; }
       let kept = 0;
       for (const poi of pois) {
-        const name = String(poi.name || '').trim();
+        const rawName = String(poi.name || '').trim();
         const cat = poiCat(poi.type);
+        const name = normalizePlace(rawName, cat);   // 车站去出口、体育场馆滤商业设施
         if (!name || !cat) continue;
         const loc = poi.location || {};
         const lat = Number(loc.lat), lng = Number(loc.lng);
