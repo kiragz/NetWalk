@@ -616,6 +616,7 @@
       resetSyncPrompt() { state.syncPromptDone = false; },
       poiCat,
       pickFormalPois,
+      backfillDay,
       repairArea,
       loadAllDays,
       drawHistoryOnMap,
@@ -1425,10 +1426,11 @@
     return '';
   }
 
-  /** 从高德逆地理返回的 POI 里挑出正式场所，并按名称去重 */
-  function pickFormalPois(pois, pos) {
+  /** 从高德逆地理返回的 POI 里挑出正式场所，并按名称去重；road 为采集时所在路名（可选） */
+  function pickFormalPois(pois, pos, road) {
     const out = [];
     const seen = new Set();
+    const r = String(road || '').trim().slice(0, 30);
     for (const poi of (pois || [])) {
       const name = String(poi.name || '').trim();
       const cat = poiCat(poi.type);
@@ -1438,7 +1440,9 @@
       let lat = Number(loc.lat != null ? loc.lat : (loc.getLat ? loc.getLat() : pos.lat));
       let lng = Number(loc.lng != null ? loc.lng : (loc.getLng ? loc.getLng() : pos.lng));
       if (!Number.isFinite(lat) || !Number.isFinite(lng)) { lat = pos.lat; lng = pos.lng; }
-      out.push({ name: name.slice(0, 60), cat, lat, lng, t: Date.now() });
+      const item = { name: name.slice(0, 60), cat, lat, lng, t: Date.now() };
+      if (r) item.road = r;
+      out.push(item);
     }
     return out;
   }
@@ -1452,9 +1456,10 @@
       if (moved < 150) return;   // 没走出 150 米就不重复采
     }
     state.lastCollectPos = { lat: pos.lat, lng: pos.lng };
+    const road = (state.engine && state.engine.road) || '';   // 采集时所在路名
     try {
       const pois = await state.provider.nearbyPlaces(pos);
-      const list = pickFormalPois(pois, pos);
+      const list = pickFormalPois(pois, pos, road);
       if (!list.length) return;
       const w = await postJson('/api/places/add', { date: today(), places: list }, 8000);
       if (w && w.added) {
@@ -1511,10 +1516,25 @@
       ? `共 ${total} 个地点 · ${shown.length} 天 · ` + Object.entries(byCat).map(([k, v]) => `${albumCatIcon(k)}${k} ${v}`).join(' · ')
       : '还没有收集到正式地点（高德模式下行走时自动收集；老数据可用「↺ 重溯补采」补录）';
     if (el.albumBody) {
-      el.albumBody.innerHTML = shown.map((d) => [
-        `<div style="margin:10px 0 4px;font-weight:700;display:flex;justify-content:space-between;align-items:center"><span>📅 ${d.date} · ${d.places.length} 个</span><button class="btn sm" data-backfill="${d.date}" title="沿这天的实际轨迹逐段逆地理，补录漏掉的正式地点" style="padding:2px 8px">↺ 重溯补采</button></div>`,
-        d.places.map((p) => `<div style="padding:3px 0;display:flex;justify-content:space-between;align-items:center;gap:8px"><span style="color:var(--txt-dim)">${albumCatIcon(p.cat)} <b style="color:var(--txt)">${p.name}</b> <span style="opacity:.7">· ${p.cat}</span></span><span class="album-del" data-date="${d.date}" data-name="${p.name}" title="从收集册删除" style="cursor:pointer;opacity:.45;font-weight:700">✕</span></div>`).join(''),
-      ].join('')) || '<div class="hint">暂无记录</div>';
+      el.albumBody.innerHTML = shown.map((d) => {
+        // 按路名分组：路名做小标题，该路上收集到的地点列在下面；没记路名的归到末尾
+        const groups = new Map();
+        for (const p of d.places) {
+          const r = String(p.road || '').trim() || '未记录路名';
+          if (!groups.has(r)) groups.set(r, []);
+          groups.get(r).push(p);
+        }
+        const entries = [...groups.entries()].sort((a, b) => {
+          if (a[0] === '未记录路名') return 1;
+          if (b[0] === '未记录路名') return -1;
+          return b[1].length - a[1].length;
+        });
+        const groupHtml = entries.map(([road, places]) => [
+          `<div style="margin:8px 0 2px;padding:3px 8px;background:var(--bg-dim,rgba(127,127,127,.12));border-left:3px solid var(--accent,#7c6cf0);border-radius:4px;font-weight:700;display:flex;justify-content:space-between;align-items:center"><span>🛣️ ${road}</span><span style="opacity:.6;font-weight:400">${places.length} 个</span></div>`,
+          places.map((p) => `<div style="padding:2px 0 2px 18px;display:flex;justify-content:space-between;align-items:center;gap:8px"><span style="color:var(--txt-dim)">${albumCatIcon(p.cat)} <b style="color:var(--txt)">${p.name}</b> <span style="opacity:.7">· ${p.cat}</span></span><span class="album-del" data-date="${d.date}" data-name="${p.name}" title="从收集册删除" style="cursor:pointer;opacity:.45;font-weight:700">✕</span></div>`).join(''),
+        ].join('')).join('');
+        return `<div style="margin:10px 0 4px;font-weight:700;display:flex;justify-content:space-between;align-items:center"><span>📅 ${d.date} · ${d.places.length} 个 · ${entries.length} 条路</span><button class="btn sm" data-backfill="${d.date}" title="沿这天的实际轨迹按类别搜索，补录漏掉的正式地点" style="padding:2px 8px">↺ 重溯补采</button></div>` + groupHtml;
+      }).join('') || '<div class="hint">暂无记录</div>';
     }
   }
 
@@ -1664,6 +1684,16 @@
         }
         log(`  ${CAT_ICONS[cat] || '📍'} ${cat}: ${pois.length} 个`);
       } catch (_) { /* 单类失败不影响其他类 */ }
+    }
+    // 给每个地点标注最近轨迹点的路名（收集册按路分组；纯坐标计算，不耗 API）
+    for (const p of found.values()) {
+      let best = null, bestD = Infinity;
+      for (const q of path) {
+        const d = (q.lat - p.lat) * (q.lat - p.lat) + (q.lng - p.lng) * (q.lng - p.lng);
+        if (d < bestD) { bestD = d; best = q; }
+      }
+      const r = best && String(best.road || '').trim();
+      if (r) p.road = r.slice(0, 30);
     }
     const list = [...found.values()].map((p) => ({ ...p, t: Date.now() }));
     if (!list.length) { log(`↺ ${date} 沿途没有发现正式场所`); return; }
@@ -2378,7 +2408,10 @@
       if (!pos || !Number.isFinite(pos.lat)) { log('拿不到当前位置（请在地图上先定位）'); return; }
       el.btnAlbumAdd.disabled = true;
       try {
-        const w = await postJson('/api/places/add', { date: today(), places: [{ name, cat, lat: pos.lat, lng: pos.lng, t: Date.now() }] }, 8000);
+        const roadNow = (state.engine && state.engine.road) || '';
+        const addItem = { name, cat, lat: pos.lat, lng: pos.lng, t: Date.now() };
+        if (String(roadNow).trim()) addItem.road = String(roadNow).trim().slice(0, 30);
+        const w = await postJson('/api/places/add', { date: today(), places: [addItem] }, 8000);
         if (w && w.ok) { log(`📔 已手动添加：${name}（${cat}）`); if (inp) inp.value = ''; openAlbum(); }
         else log('添加失败：' + ((w && w.error) || '未知'));
       } catch (err) { log('添加失败：' + (err && err.message ? err.message : err)); }

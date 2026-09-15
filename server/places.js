@@ -48,7 +48,10 @@ class PlaceStore {
       if (!Number.isFinite(t) || t <= 0 || t > now + 60000) t = now;
       if (seen.has(name)) continue;
       seen.add(name);
-      list.push({ name, cat, lat: Number(lat.toFixed(6)), lng: Number(lng.toFixed(6)), t: Math.round(t) });
+      const item = { name, cat, lat: Number(lat.toFixed(6)), lng: Number(lng.toFixed(6)), t: Math.round(t) };
+      const road = String((p && p.road) || '').trim().slice(0, 30);
+      if (road) item.road = road;   // 所在路名（收集册按路分组用，可选）
+      list.push(item);
       added++;
     }
     if (added) this.save(data);
