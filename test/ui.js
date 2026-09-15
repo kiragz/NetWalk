@@ -109,6 +109,8 @@ const calls = [];
 const postBodies = [];   // 记录 /api/config 的 POST 载荷，用于校验出发点配置
 const PLACES_POSTS = [];   // 记录 /api/places/add 的载荷（收集册实时采集测试用）
 let PLACES_DAYS = [];      // /api/places 返回的按天数据（收集册按天回顾测试用）
+let SESSIONS_STUB = { ok: true, starts: [], resume: null };   // /api/sessions 桩
+const SESSION_POSTS = [];  // 记录 session 相关 POST（回滚 / 单删 / 取消指定）
 win.fetch = function (url, opt) {
   const u = String(url);
   calls.push((opt && opt.method ? opt.method : 'GET') + ' ' + u);
@@ -134,6 +136,36 @@ win.fetch = function (url, opt) {
   if (u.indexOf('/api/archive/export') === 0) return json({ ok: true, code: 'NW1.' + 'A'.repeat(300), days: 3, bytes: 7080, rawBytes: 44764 });
   if (u.indexOf('/api/archive/import') === 0) return json({ ok: true, added: 1, merged: 2, days: 4, achievements: { newly: [], unlocked: {}, total: 36, got: 4 } });
   if (u.indexOf('/api/session/end') === 0) return json({ ok: true, date: TODAY, achievements: { newly: ['dist_5k'], unlocked: {}, total: 36, got: 5 }, mail: MAIL_STUB });
+  if (u.indexOf('/api/sessions') === 0) return json(SESSIONS_STUB);
+  if (u.indexOf('/api/session/rollback') === 0) {
+    let body = {};
+    try { body = JSON.parse(opt.body || '{}'); } catch (_) {}
+    SESSION_POSTS.push({ path: 'rollback', body });
+    // 桩要跟着变：真实服务端回滚后 /api/sessions 会返回被裁掉的列表 + 新的继续点
+    SESSIONS_STUB = {
+      ok: true,
+      resume: { n: body.to, date: '2026-09-14', lat: 23.11, lng: 113.31, t: 2000 },
+      starts: (SESSIONS_STUB.starts || []).filter((x) => Number(x.n) <= Number(body.to)),
+    };
+    return json({
+      ok: true, removedSessions: 2, removedPoints: 3, removedDays: 1, placesRemoved: 1, cutoff: 2000,
+      resume: SESSIONS_STUB.resume, starts: SESSIONS_STUB.starts,
+    });
+  }
+  if (u.indexOf('/api/session/delete') === 0) {
+    let body = {};
+    try { body = JSON.parse(opt.body || '{}'); } catch (_) {}
+    SESSION_POSTS.push({ path: 'delete', body });
+    SESSIONS_STUB = { ok: true, resume: SESSIONS_STUB.resume, starts: (SESSIONS_STUB.starts || []).filter((x) => Number(x.n) !== Number(body.n)) };
+    return json({ ok: true, removed: 2, days: 1, sessions: 2, starts: SESSIONS_STUB.starts });
+  }
+  if (u.indexOf('/api/session/resume') === 0) {
+    let body = {};
+    try { body = JSON.parse(opt.body || '{}'); } catch (_) {}
+    SESSION_POSTS.push({ path: 'resume', body });
+    if (!Number(body.n)) SESSIONS_STUB = { ok: true, resume: null, starts: SESSIONS_STUB.starts };
+    return json({ ok: true, cleared: true });
+  }
   if (u.indexOf('/api/session/') === 0) return json({ ok: true, date: TODAY, achievements: { newly: ['dist_5k'], unlocked: {}, total: 36, got: 5 } });
   if (u.indexOf('/api/report/') === 0) return json({ ok: true, url: '/reports/netwalk-' + TODAY + '.html' });
   if (u.indexOf('/api/places/add') === 0) {
@@ -993,6 +1025,63 @@ const shown = (id) => $(id).classList.contains('show');
   TRACK_RANGE_DAYS = oldTrackDays;
   PLACES_DAYS = oldPlacesDays;
   $('btnAlbumClose').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+
+  // U：出发记录（指定继续点 / 回滚 / 单次删除）
+  console.log('\n== U. 出发记录：选择继续出发点 / 回滚 ==');
+  const oldSessions = SESSIONS_STUB;
+  const oldConfirm = win.confirm;
+  win.confirm = () => true;          // 破坏性操作的确认框
+  SESSIONS_STUB = {
+    ok: true,
+    resume: null,
+    starts: [
+      { date: '2026-09-13', n: 1, lat: 23.10, lng: 113.30, t: 1757700000000, points: 120 },
+      { date: '2026-09-14', n: 2, lat: 23.11, lng: 113.31, t: 1757800000000, points: 200 },
+      { date: TODAY, n: 3, lat: 23.12, lng: 113.32, t: 1757900000000, points: 150 },
+    ],
+  };
+  SESSION_POSTS.length = 0;
+  $('btnSessions').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(300);
+  ok('出发记录面板已打开', shown('maskSessions'));
+  ok('列出全部出发（含序号与轨迹点数）', $('sessionsBody').textContent.indexOf('#1') >= 0
+    && $('sessionsBody').textContent.indexOf('#3') >= 0
+    && $('sessionsBody').textContent.indexOf('120') >= 0);
+  ok('未指定时提示从最新位置继续', $('sessionsResume').textContent.indexOf('最新位置') >= 0, $('sessionsResume').textContent);
+  ok('每次出发都有「从这里继续」按钮', $('sessionsBody').querySelectorAll('[data-resume]').length === 3);
+  // 选第 1 次继续 → 回滚（删掉 2、3）
+  $('sessionsBody').querySelector('[data-resume="1"]').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(300);
+  const rp = SESSION_POSTS.find((x) => x.path === 'rollback');
+  ok('回滚请求带上了目标序号', !!rp && rp.body.to === 1, JSON.stringify(SESSION_POSTS.map((x) => x.path + ':' + JSON.stringify(x.body))));
+  ok('日志说明删了几次/几点', $('logList').textContent.indexOf('已回滚到第 1 次出发') >= 0);
+  ok('日志说明下次从哪里继续', $('logList').textContent.indexOf('第 1 次出发的位置继续') >= 0);
+  ok('回滚后显示新的继续点', $('sessionsResume').textContent.indexOf('第 1 次') >= 0, $('sessionsResume').textContent);
+  // 单独删掉某一次（先把桩恢复成 3 次，模拟"数据还在"的情况）
+  SESSIONS_STUB = {
+    ok: true,
+    resume: SESSIONS_STUB.resume,
+    starts: [
+      { date: '2026-09-13', n: 1, lat: 23.10, lng: 113.30, t: 1757700000000, points: 120 },
+      { date: '2026-09-14', n: 2, lat: 23.11, lng: 113.31, t: 1757800000000, points: 200 },
+      { date: TODAY, n: 3, lat: 23.12, lng: 113.32, t: 1757900000000, points: 150 },
+    ],
+  };
+  $('btnSessions').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(250);
+  ok('重新打开后仍是 3 次出发', $('sessionsBody').querySelectorAll('[data-del]').length === 3);
+  $('sessionsBody').querySelector('[data-del="3"]').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(250);
+  ok('单次删除请求正确', SESSION_POSTS.some((x) => x.path === 'delete' && x.body.n === 3));
+  // 取消指定
+  $('btnSessionsResumeClear').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(200);
+  ok('「恢复默认」请求 n=0', SESSION_POSTS.some((x) => x.path === 'resume' && x.body.n === 0));
+  $('btnSessionsClose').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(60);
+  ok('关闭出发记录面板', !shown('maskSessions'));
+  SESSIONS_STUB = oldSessions;
+  win.confirm = oldConfirm;
 
   console.log('\n===== UI 测试结果：' + pass + ' 通过 / ' + fail + ' 失败 =====');
   if (errors.length) { console.log('\n捕获到的错误：'); errors.slice(0, 10).forEach((e) => console.log('  - ' + e)); }

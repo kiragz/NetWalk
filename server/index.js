@@ -770,7 +770,75 @@ app.get('/api/places/summary', (req, res) => {
   res.json(placeStore.summary(from, to));
 });
 app.get('/api/sessions', (req, res) => {
-  res.json({ ok: true, starts: store.allSessionStarts() });
+  res.json({ ok: true, starts: store.allSessionStarts(), resume: config.resumePoint || null });
+});
+
+/** 删除第 n 次出发产生的全部数据（轨迹点 / 采样 / 路口记录 / 出发记录），其余出发重新编号 */
+app.post('/api/session/delete', (req, res) => {
+  try {
+    const n = Number((req.body && req.body.n) || 0);
+    const r = store.deleteSession(n);
+    if (!r.ok) return res.status(400).json({ ok: false, error: r.error });
+    // 删掉的正好是"指定继续的出发点" → 清掉该指定，避免继续到一个已删除的位置
+    if (config.resumePoint && Number(config.resumePoint.n) === n) {
+      config.resumePoint = null;
+      saveConfig(config);
+    }
+    store.renumberSessions();
+    const agg = store.aggregate();
+    achStore.refresh(agg);
+    logLine(`session delete: #${n} removed=${r.removed} days=${r.days}`);
+    res.json({ ok: true, ...r, starts: store.allSessionStarts() });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
+});
+
+/** 指定「下次从第 n 次出发的起点继续」（n 传 null 或 0 表示恢复成"从最新位置继续"） */
+app.post('/api/session/resume', (req, res) => {
+  const n = Number((req.body && req.body.n) || 0);
+  if (!n) {
+    config.resumePoint = null;
+    saveConfig(config);
+    return res.json({ ok: true, cleared: true });
+  }
+  const s = store.allSessionStarts().find((x) => Number(x.n) === n);
+  if (!s) return res.status(400).json({ ok: false, error: `没有第 ${n} 次出发的记录` });
+  config.resumePoint = { n, date: s.date, lat: s.lat, lng: s.lng, t: s.t };
+  saveConfig(config);
+  logLine(`session resume: set to #${n} (${s.lat},${s.lng})`);
+  res.json({ ok: true, resume: config.resumePoint });
+});
+
+/**
+ * 回滚到第 n 次出发：保留这一次及之前的全部数据，删掉之后几次出发产生的轨迹，
+ * 并把「下次继续的位置」定在第 n 次结束的地方。期间收集的地点也一并清掉。
+ */
+app.post('/api/session/rollback', (req, res) => {
+  try {
+    const to = Number((req.body && req.body.to) || 0);
+    const r = store.rollbackFrom(to);
+    if (!r.ok) return res.status(400).json({ ok: false, error: r.error });
+    const placesRemoved = r.cutoff ? placeStore.removeSince(r.cutoff) : 0;
+    // 继续点：被删的第一次出发的起点（= 第 n 次结束的位置）；没有可删的就用第 n 次的起点
+    if (r.resumeCandidate) {
+      config.resumePoint = r.resumeCandidate;
+    } else {
+      const s = store.allSessionStarts().find((x) => Number(x.n) === to);
+      config.resumePoint = s ? { n: to, date: s.date, lat: s.lat, lng: s.lng, t: s.t } : null;
+    }
+    saveConfig(config);
+    const agg = store.aggregate();
+    achStore.refresh(agg);
+    logLine(`session rollback: to=#${to} removed=${r.removedPoints}pts/${r.removedSessions}次 places=${placesRemoved}`);
+    res.json({
+      ok: true, ...r, placesRemoved,
+      starts: store.allSessionStarts(),
+      resume: config.resumePoint,
+    });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e.message });
+  }
 });
 
 app.post('/api/session/end', async (req, res) => {

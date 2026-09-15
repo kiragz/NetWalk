@@ -225,6 +225,58 @@ p.planRoute(from, { lat: far.lat, lng: far.lng }).then(async (route) => {
     JSON.stringify(Object.values(p3.load().days).flat().map((x) => x.name)));
   ok(impTake.resetTakeover === true, '接管标记为 true');
 
+  console.log('\n== 7.6 回滚到某次出发（保留 ≤N，删掉之后几次） ==');
+  const dirR = path.join(SMOKE_DIR, 'rollback');
+  rmBestEffort(dirR);
+  const sr = new TrackStore(dirR);
+  const RD = '2026-09-15';
+  {
+    // 三次出发，直接写 sessions 保证时间戳递增（addSessionStart 用 Date.now() 会同毫秒）
+    const d0 = sr.load(RD);
+    d0.sessions = [
+      { n: 1, lat: 23.10, lng: 113.30, t: 1000 },
+      { n: 2, lat: 23.11, lng: 113.31, t: 2000 },
+      { n: 3, lat: 23.12, lng: 113.32, t: 3000 },
+    ];
+    sr.markDirty(RD);
+    sr.appendPath(RD, [
+      { lat: 23.10, lng: 113.30, t: 1100, no: 1, road: 'A路' },
+      { lat: 23.105, lng: 113.305, t: 1200, no: 1, road: 'A路' },
+      { lat: 23.11, lng: 113.31, t: 2100, no: 2, road: 'B路' },
+      { lat: 23.115, lng: 113.315, t: 2200, no: 2, road: 'B路' },
+      { lat: 23.12, lng: 113.32, t: 3100, no: 3, road: 'C路' },
+    ]);
+    sr.appendRoll(RD, { t: 2100, lat: 23.11, lng: 113.31, road: 'B路', roll: 50, choice: '直行' });
+    sr.appendRoll(RD, { t: 1100, lat: 23.10, lng: 113.30, road: 'A路', roll: 20, choice: '左转' });
+    sr.flush();
+  }
+  ok(sr.allSessionStarts().length === 3, '准备：3 次出发', sr.allSessionStarts().length);
+  const rb = sr.rollbackFrom(1);
+  ok(rb.ok === true, '回滚成功');
+  ok(rb.removedSessions === 2, '删掉 2 次出发（#2 #3）', rb.removedSessions);
+  ok(rb.removedPoints === 3, '删掉 3 个轨迹点', rb.removedPoints);
+  ok(sr.get(RD).path.length === 2 && sr.get(RD).path.every((p) => Number(p.no) === 1),
+    '只剩第 1 次出发的轨迹', JSON.stringify(sr.get(RD).path.map((p) => p.no)));
+  ok(sr.allSessionStarts().length === 1, '只剩 1 条出发记录');
+  ok(sr.get(RD).rolls.length === 1, '被删那次的窗口内路口记录一并清掉', sr.get(RD).rolls.length);
+  ok(Math.abs(rb.resumeCandidate.lat - 23.11) < 1e-6 && Math.abs(rb.resumeCandidate.lng - 113.31) < 1e-6,
+    '继续点 = 第 1 次结束的位置', JSON.stringify(rb.resumeCandidate));
+  ok(rb.cutoff === 2000, '分界线 = 第一次被删出发的时间', rb.cutoff);
+  ok(rb.resumeCandidate.n === 1, '继续点记的是保留的那一次');
+  const rb2 = sr.rollbackFrom(1);
+  ok(rb2.ok === true && rb2.removedSessions === 0 && rb2.removedPoints === 0, '已是最新一次时不删任何数据');
+  ok(rb2.resumeCandidate === null, '没有可删的就没有"继续点候选"');
+  ok(sr.rollbackFrom(9).ok === false, '不存在的出发序号被拒绝');
+  // 收集册：回滚时清掉之后那段时间收集的地点
+  const pr = new PlaceStore(dirR);
+  pr.add('2026-09-15', [
+    { name: '早收录', cat: '医院', lat: 23.1, lng: 113.3, t: 1500 },
+    { name: '晚收录', cat: '医院', lat: 23.1, lng: 113.3, t: 2500 },
+  ]);
+  ok(pr.removeSince(2000) === 1, '收集册按时间清掉回滚点之后的地点');
+  ok((pr.load().days['2026-09-15'] || []).every((p) => p.name === '早收录'), '保留的是回滚点之前的地点');
+  ok(pr.removeSince(0) === 0, 'cutoff 为 0 时不动数据（防误删）');
+
   console.log('\n== 8. 聚合统计 ==');
   const agg = s2.aggregate();
   ok(agg.days === 1, '聚合天数正确', agg.days);

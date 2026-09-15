@@ -66,6 +66,25 @@ class PlaceStore {
   }
 
   /**
+   * 删除 t >= cutoff 的收录（回滚到某次出发时，把之后那几次出发收集到的地方一并清掉）。
+   * @returns {number} 删掉的条数
+   */
+  removeSince(cutoff) {
+    const c = Number(cutoff) || 0;
+    if (!c) return 0;
+    const data = this.load();
+    let removed = 0;
+    for (const d of Object.keys(data.days)) {
+      const list = data.days[d] || [];
+      const keep = list.filter((p) => Number(p.t) < c);
+      removed += list.length - keep.length;
+      if (keep.length) data.days[d] = keep; else delete data.days[d];
+    }
+    if (removed) this.save(data);
+    return removed;
+  }
+
+  /**
    * 合并另一份按天收录（跨设备同步用）：
    * 同一天同名去重；本机已有条目优先保留，仅补上缺失的 road/dist。
    * @returns {{added:number, merged:number, days:number}}

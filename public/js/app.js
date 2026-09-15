@@ -102,6 +102,8 @@
     btnRepairUndo: $('btnRepairUndo'), btnAlbum: $('btnAlbum'), btnAlbumQuick: $('btnAlbumQuick'), maskAlbum: $('maskAlbum'), albumBody: $('albumBody'), albumSummary: $('albumSummary'), albumTabs: $('albumTabs'), btnAlbumClose: $('btnAlbumClose'),
     albumAddName: $('albumAddName'), albumAddCat: $('albumAddCat'), btnAlbumAdd: $('btnAlbumAdd'), btnAlbumBackfill: $('btnAlbumBackfill'),
     albumNav: $('albumNav'), albumPrev: $('albumPrev'), albumNext: $('albumNext'), albumDate: $('albumDate'),
+    btnSessions: $('btnSessions'), maskSessions: $('maskSessions'), sessionsBody: $('sessionsBody'), sessionsResume: $('sessionsResume'),
+    btnSessionsClose: $('btnSessionsClose'), btnSessionsResumeClear: $('btnSessionsResumeClear'),
     maskSyncFirst: $('maskSyncFirst'), btnSyncFirstGo: $('btnSyncFirstGo'), btnSyncFirstSkip: $('btnSyncFirstSkip'), syncFirstHint: $('syncFirstHint'),
     btnRepairArea: $('btnRepairArea'), btnRepairGo: $('btnRepairGo'), btnRepairCancel: $('btnRepairCancel'),
     repairInfo: $('repairInfo'), repairBar: $('repairBar'), pickBox: $('pickBox'), netBanner: $('netBanner'),
@@ -899,8 +901,13 @@
       // 失败静默：本地数据照常使用，具体原因在日志里（未配置 IMAP / 收件箱无存档邮件）
     } catch (_) { /* 离线时忽略 */ }
   }
-  /** 找"最近一次走过的位置"：服务端 /api/lastpos 直接扫最近 90 天的数据，跨天续走 */
+  /** 找"下次出发的位置"：① 手动指定的出发点优先 ② 否则最近一次走过的位置（跨天续走） */
   async function findLastPosition() {
+    // ① 用户在「出发点管理」里指定了从第 N 次出发的起点继续
+    const rp = state.cfg && state.cfg.resumePoint;
+    if (rp && Number.isFinite(Number(rp.lat)) && Number.isFinite(Number(rp.lng))) {
+      return { lng: Number(rp.lng), lat: Number(rp.lat), date: rp.date || '', fromSession: Number(rp.n) || 0 };
+    }
     try {
       const lp = await fetch('/api/lastpos').then((r) => r.json()).catch(() => null);
       if (lp && lp.pos !== null && isFiniteLatLng(lp)) {
@@ -1709,6 +1716,101 @@
         return `<div style="margin:10px 0 4px;font-weight:700;display:flex;justify-content:space-between;align-items:center"><span>📅 ${d.date} · ${d.places.length} 个 · ${entries.length} 条路${tPts ? ' · 轨迹 ' + tPts + ' 点' : ''}</span><button class="btn sm" data-backfill="${d.date}" title="沿这天的实际轨迹按类别搜索，补录漏掉的正式地点" style="padding:2px 8px">↺ 重溯补采</button></div>` + groupHtml;
       }).join('') || '<div class="hint">暂无记录</div>';
     }
+  }
+
+  // ---------- 出发记录：指定继续点 / 回滚 ----------
+  let sessionsCache = null;
+
+  /** 破坏性操作前的二次确认（无 window.confirm 的环境直接放行，便于自动化测试） */
+  function askConfirm(msg) {
+    try { return window.confirm ? window.confirm(msg) : true; } catch (_) { return true; }
+  }
+
+  function fmtSessionTime(t) {
+    const d = new Date(Number(t) || 0);
+    const p = (n) => String(n).padStart(2, '0');
+    return `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+
+  async function openSessions() {
+    if (el.maskSessions) el.maskSessions.classList.add('show');
+    if (el.sessionsBody) el.sessionsBody.innerHTML = '<div class="hint">加载中…</div>';
+    try {
+      const r = await fetchJson('/api/sessions', 8000);
+      sessionsCache = r || { starts: [], resume: null };
+      renderSessions();
+    } catch (e) {
+      if (el.sessionsBody) el.sessionsBody.innerHTML = '<div class="hint">加载失败：' + (e && e.message ? e.message : e) + '</div>';
+    }
+  }
+
+  function renderSessions() {
+    const list = ((sessionsCache && sessionsCache.starts) || []).slice();
+    const resume = sessionsCache && sessionsCache.resume;
+    const curN = resume ? Number(resume.n) : 0;
+    if (el.sessionsResume) {
+      el.sessionsResume.textContent = resume && Number.isFinite(Number(resume.lat))
+        ? `📍 下次将从第 ${curN} 次出发的位置继续（${resume.date || ''} ${Number(resume.lat).toFixed(4)}, ${Number(resume.lng).toFixed(4)}）`
+        : '下次从最新位置继续（未指定）。';
+    }
+    if (!el.sessionsBody) return;
+    if (!list.length) { el.sessionsBody.innerHTML = '<div class="hint">还没有出发记录</div>'; return; }
+    el.sessionsBody.innerHTML = list.slice()
+      .sort((a, b) => (Number(b.t) || 0) - (Number(a.t) || 0))   // 新的在上面
+      .map((s) => {
+        const n = Number(s.n);
+        return `<div style="display:flex;justify-content:space-between;align-items:center;gap:8px;padding:5px 0;border-bottom:1px solid rgba(127,127,127,.14)">
+        <span>${n === curN ? '📍 ' : ''}<b>#${n}</b> · ${fmtSessionTime(s.t)} · 起点 ${Number(s.lat).toFixed(4)}, ${Number(s.lng).toFixed(4)} · 轨迹 ${s.points || 0} 点</span>
+        <span style="white-space:nowrap">
+          <button class="btn sm" data-resume="${n}" title="下次从这次出发的位置继续，并删除之后几次出发的轨迹">⏮ 从这里继续</button>
+          <button class="btn sm" data-del="${n}" title="只删除这一次出发产生的轨迹（其余重新编号）">🗑 删除</button>
+        </span>
+      </div>`;
+      }).join('');
+  }
+
+  /** 回滚：保留第 n 次及之前的数据，删掉之后的轨迹，并把继续点定在第 n 次结束处 */
+  async function doRollbackTo(n) {
+    const list = (sessionsCache && sessionsCache.starts) || [];
+    const later = list.filter((s) => Number(s.n) > n).length;
+    const msg = later
+      ? `确定从第 ${n} 次出发的位置继续吗？\n将删除第 ${n} 次之后 ${later} 次出发产生的轨迹（以及那期间收集的地点）。\n此操作不可撤销。`
+      : `第 ${n} 次已经是最新一次出发：只把「继续位置」定在这里，不删除任何数据。确定吗？`;
+    if (!askConfirm(msg)) return;
+    try {
+      const r = await postJson('/api/session/rollback', { to: n }, 15000);
+      if (!r || !r.ok) { log('回滚失败：' + ((r && r.error) || '未知')); return; }
+      log(`⏮ 已回滚到第 ${n} 次出发：删除 ${r.removedSessions} 次出发的 ${r.removedPoints} 个轨迹点`
+        + (r.placesRemoved ? `、${r.placesRemoved} 个收集册地点` : '')
+        + `。下次将从 ${r.resume && r.resume.date ? r.resume.date + ' ' : ''}第 ${n} 次出发的位置继续。`);
+      if (state.cfg) state.cfg.resumePoint = r.resume || null;
+      albumCache = null;
+      if (el.maskAlbum && el.maskAlbum.classList.contains('show')) openAlbum();
+      await openSessions();
+      try { await drawHistoryOnMap(); } catch (_) { /* 地图重画失败不影响数据 */ }
+    } catch (e) { log('回滚失败：' + (e && e.message ? e.message : e)); }
+  }
+
+  async function doDeleteSession(n) {
+    if (!askConfirm(`确定删除第 ${n} 次出发产生的轨迹吗？\n（该次出发的轨迹点与路口记录会被删除，其余出发重新编号）\n此操作不可撤销。`)) return;
+    try {
+      const r = await postJson('/api/session/delete', { n }, 15000);
+      if (!r || !r.ok) { log('删除失败：' + ((r && r.error) || '未知')); return; }
+      log(`🗑 已删除第 ${n} 次出发（${r.removed || 0} 个轨迹点），其余出发已重新编号。`);
+      await openSessions();
+      try { await drawHistoryOnMap(); } catch (_) { /* noop */ }
+    } catch (e) { log('删除失败：' + (e && e.message ? e.message : e)); }
+  }
+
+  async function clearResumePoint() {
+    try {
+      const r = await postJson('/api/session/resume', { n: 0 }, 8000);
+      if (r && r.ok) {
+        if (state.cfg) state.cfg.resumePoint = null;
+        log('↺ 已恢复默认：下次从最新位置继续。');
+        await openSessions();
+      }
+    } catch (e) { log('取消失败：' + (e && e.message ? e.message : e)); }
   }
 
   function setMapFollowing(on) {
@@ -2576,6 +2678,18 @@
       loadKeyForm();   // 回填 Key / 安全密钥，避免用户以为没保存
     });
     if (el.btnMapDismiss) el.btnMapDismiss.addEventListener('click', hideMapBanner);
+    // 出发记录：指定继续点 / 回滚 / 单次删除
+    if (el.btnSessions) el.btnSessions.addEventListener('click', () => { openSessions().catch(() => {}); });
+    if (el.btnSessionsClose) el.btnSessionsClose.addEventListener('click', () => { if (el.maskSessions) el.maskSessions.classList.remove('show'); });
+    if (el.maskSessions) el.maskSessions.addEventListener('click', (e) => { if (e.target === el.maskSessions) el.maskSessions.classList.remove('show'); });
+    if (el.btnSessionsResumeClear) el.btnSessionsResumeClear.addEventListener('click', () => { clearResumePoint().catch(() => {}); });
+    if (el.sessionsBody) el.sessionsBody.addEventListener('click', (e) => {
+      const res = e.target.closest && e.target.closest('[data-resume]');
+      if (res) { doRollbackTo(Number(res.dataset.resume)).catch(() => {}); return; }
+      const del = e.target.closest && e.target.closest('[data-del]');
+      if (del) { doDeleteSession(Number(del.dataset.del)).catch(() => {}); }
+    });
+
     el.btnAlbumClose.addEventListener('click', () => { if (el.maskAlbum) el.maskAlbum.classList.remove('show'); });
     if (el.albumTabs) el.albumTabs.addEventListener('click', (e) => {
       const btn = e.target.closest && e.target.closest('.ach-tab');

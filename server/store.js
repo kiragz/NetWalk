@@ -199,13 +199,143 @@ class TrackStore {
     return n;
   }
 
-  /** 全部出发点（按出发顺序），主地图/轨迹回看画紫点用 */
+  /** 全部出发点（按出发顺序），主地图/轨迹回看画紫点用；顺带统计每次出发的轨迹点数 */
   allSessionStarts() {
     const out = [];
+    const counts = new Map();
+    for (const d of this.listDates()) {
+      for (const p of (this.load(d).path || [])) {
+        const n = Number(p.no) || 0;
+        counts.set(n, (counts.get(n) || 0) + 1);
+      }
+    }
     for (const d of this.listDates().sort()) {
-      for (const s of (this.load(d).sessions || [])) out.push({ date: d, n: s.n, lat: s.lat, lng: s.lng, t: s.t });
+      for (const s of (this.load(d).sessions || [])) {
+        out.push({ date: d, n: s.n, lat: s.lat, lng: s.lng, t: s.t, points: counts.get(Number(s.n)) || 0 });
+      }
     }
     return out;
+  }
+
+  /**
+   * 删除「第 n 次出发」产生的全部数据：该次出发的轨迹点、当次时间窗内的采样与路口记录、出发记录本身。
+   * 剩下的出发会重新编号 1..N（轨迹点上的会话号同步重映射，绘制切分才不会错）。
+   * @returns {{ok:boolean, removed?:number, error?:string}}
+   */
+  deleteSession(n) {
+    const want = Number(n);
+    if (!Number.isFinite(want) || want <= 0) return { ok: false, error: '出发序号不合法' };
+    const all = [];
+    for (const d of this.listDates()) {
+      for (const s of (this.load(d).sessions || [])) all.push({ date: d, s });
+    }
+    all.sort((a, b) => (Number(a.s.t) || 0) - (Number(b.s.t) || 0));
+    const idx = all.findIndex((x) => Number(x.s.n) === want);
+    if (idx < 0) return { ok: false, error: `没有第 ${want} 次出发的记录` };
+    const start = Number(all[idx].s.t) || 0;
+    const nextT = all[idx + 1] ? (Number(all[idx + 1].s.t) || Infinity) : Infinity;
+    // 旧 → 新 的会话号映射（被删的那个不参与重排）
+    const mapping = new Map();
+    let k = 0;
+    for (const x of all) {
+      if (x === all[idx]) continue;
+      k++;
+      mapping.set(Number(x.s.n), k);
+    }
+    const inWindow = (t) => {
+      const v = Number(t) || 0;
+      return v >= start && v < nextT;
+    };
+    let removed = 0;
+    let touched = 0;
+    for (const d of this.listDates()) {
+      const data = this.load(d);
+      let changed = false;
+      // ① 轨迹点：会话号匹配的直接删；老数据没有 no 的按时间窗兜底
+      const pBefore = data.path.length;
+      data.path = (data.path || []).filter((p) => {
+        const pn = Number(p.no) || 0;
+        if (pn === want) return false;
+        if (pn === 0 && inWindow(p.t)) return false;
+        return true;
+      });
+      if (data.path.length !== pBefore) { removed += pBefore - data.path.length; changed = true; }
+      for (const p of data.path) {
+        const m = mapping.get(Number(p.no));
+        if (m && m !== Number(p.no)) { p.no = m; changed = true; }
+      }
+      // ② 采样 / 路口记录：按当次出发的时间窗删除
+      const sBefore = (data.samples || []).length;
+      data.samples = (data.samples || []).filter((s) => !inWindow(s.t));
+      if (data.samples.length !== sBefore) changed = true;
+      const rBefore = (data.rolls || []).length;
+      data.rolls = (data.rolls || []).filter((r) => !inWindow(r.t));
+      if (data.rolls.length !== rBefore) changed = true;
+      // ③ 出发记录：删掉并重编号
+      const sessBefore = (data.sessions || []).length;
+      data.sessions = (data.sessions || []).filter((s) => Number(s.n) !== want);
+      if (data.sessions.length !== sessBefore) changed = true;
+      for (const s of data.sessions) {
+        const m = mapping.get(Number(s.n));
+        if (m && m !== Number(s.n)) { s.n = m; changed = true; }
+      }
+      // ④ 当天统计按剩余数据重算（里程取采样里累计 dist 的最大值）
+      if (changed) {
+        let dist = 0;
+        let first = 0;
+        let last = 0;
+        for (const s of data.samples || []) {
+          if (Number(s.dist) > dist) dist = Number(s.dist);
+          const t = Number(s.t) || 0;
+          if (!first || t < first) first = t;
+          if (t > last) last = t;
+        }
+        if (data.stats && typeof data.stats === 'object') {
+          data.stats.distance = data.path.length ? dist : 0;
+          data.stats.duration = (last && first) ? Math.max(0, last - first) : 0;
+        }
+        this.markDirty(d);
+        touched++;
+      }
+    }
+    this.flush();
+    return { ok: true, removed, days: touched, sessions: k };
+  }
+
+  /**
+   * 回滚：保留第 n 次出发及之前的所有数据，删掉第 n 次之后每一次出发产生的轨迹
+   * （多次调用 deleteSession，从序号最大的往回删，避免重编号互相影响）。
+   * @returns {{ok:boolean, removedPoints?:number, removedSessions?:number, removedDays?:number,
+   *            cutoff?:number, resumeCandidate?:object, kept?:number, error?:string}}
+   */
+  rollbackFrom(n) {
+    const want = Number(n);
+    if (!Number.isFinite(want) || want <= 0) return { ok: false, error: '出发序号不合法' };
+    const all = [];
+    for (const d of this.listDates()) {
+      for (const s of (this.load(d).sessions || [])) all.push({ date: d, s });
+    }
+    all.sort((a, b) => (Number(a.s.t) || 0) - (Number(b.s.t) || 0));
+    const idx = all.findIndex((x) => Number(x.s.n) === want);
+    if (idx < 0) return { ok: false, error: `没有第 ${want} 次出发的记录` };
+    const later = all.slice(idx + 1);   // 旧 → 新
+    if (!later.length) {
+      return { ok: true, removedPoints: 0, removedSessions: 0, removedDays: 0, cutoff: 0, resumeCandidate: null, kept: all.length };
+    }
+    // 第一次被删的那次出发的时间 = 分界线（之前的数据留着，之后的清掉）
+    const cutoff = Number(later[0].s.t) || 0;
+    // 「从这里继续」= 第 n 次结束的位置（也就是被删的第一次出发的起点）
+    const resumeCandidate = {
+      n: want, date: later[0].date,
+      lat: Number(later[0].s.lat), lng: Number(later[0].s.lng), t: cutoff,
+    };
+    let removedPoints = 0, removedSessions = 0, removedDays = 0;
+    for (let i = later.length - 1; i >= 0; i--) {
+      const r = this.deleteSession(Number(later[i].s.n));
+      if (r && r.ok) { removedPoints += r.removed || 0; removedSessions++; removedDays += r.days || 0; }
+    }
+    this.renumberSessions();
+    return { ok: true, removedPoints, removedSessions, removedDays, cutoff, resumeCandidate, kept: all.length - removedSessions };
   }
 
   /**
