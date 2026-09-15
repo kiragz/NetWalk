@@ -122,6 +122,16 @@
       this.provider.addTrackPoint(this.pos.lat, this.pos.lng, null, this.speedKmh);
       await this._planNext(true);
       this._ticker = setInterval(() => this._tick(), TICK_MS);
+      // 挂机时窗口在后台/最小化：浏览器会把 setInterval 节流到 ~1 次/分钟，分身几乎不动。
+      // 改用 Web Worker 心跳驱动（后台标签页不节流）；Worker 不可用（如测试环境）时退回 setInterval。
+      try {
+        const src = 'let t=null;onmessage=(e)=>{if(e.data==="start"&&!t){t=setInterval(()=>postMessage(0),200);}};postMessage("ready");';
+        this._worker = new Worker(URL.createObjectURL(new Blob([src], { type: 'text/javascript' })));
+        this._worker.onmessage = () => { if (this.running && !this.paused) this._tick(); };
+        this._worker.postMessage('start');
+        clearInterval(this._ticker);   // Worker 已接管心跳
+        this._ticker = null;
+      } catch (_) { /* Worker 不可用 → 继续用 setInterval */ }
       this.onLog('出发，开始今天的漫游');
     }
 
@@ -133,6 +143,7 @@
       this.running = false;
       if (this._ticker) clearInterval(this._ticker);
       this._ticker = null;
+      if (this._worker) { try { this._worker.terminate(); } catch (_) { /* noop */ } this._worker = null; }
       // 收尾采样一次，保证最后一段累计里程也落盘
       if (this.stats.distance > 0) this._sample();
       this.flush(true);
@@ -175,7 +186,10 @@
       const now = Date.now();
       let dt = (now - this._lastTick) / 1000;
       this._lastTick = now;
-      if (dt <= 0 || dt > 3) dt = TICK_MS / 1000;
+      // 挂机时浏览器节流会让两次 tick 间隔很长：放宽到最多补算 120 秒（真实时间驱动的移动，后台也能走够里程）。
+      // 超过 120 秒（如休眠/隔天）按一个 tick 周期处理，避免位置大跳。
+      if (dt <= 0) dt = TICK_MS / 1000;
+      if (dt > 120) dt = 120;
 
       const s = this.stats;
       s.durationMs += dt * 1000;

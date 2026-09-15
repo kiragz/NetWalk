@@ -1497,7 +1497,18 @@
     if (el.albumSummary) el.albumSummary.textContent = '加载中…';
     if (el.albumBody) el.albumBody.innerHTML = '<div class="hint">加载中…</div>';
     try {
-      albumCache = await fetchJson('/api/places/summary?from=0000-01-01&to=' + today(), 8000);
+      // 同时取「已收集地点」与「有轨迹的日期」：没有收录记录的日子也要列出来（可点 ↺ 重溯补采）
+      const [sum, tr] = await Promise.all([
+        fetchJson('/api/places/summary?from=0000-01-01&to=' + today(), 8000).catch(() => null),
+        fetchJson('/api/track/range?from=0000-01-01&to=' + today(), 8000).catch(() => null),
+      ]);
+      const placeDays = ((sum && sum.list) || []).slice();
+      const trackDates = ((tr && tr.days) || []).map((d) => d.date).filter((d, i, a) => a.indexOf(d) === i);
+      const merged = trackDates.slice().sort((a, b) => (a < b ? 1 : -1)).map((date) => ({
+        date,
+        places: ((placeDays.find((x) => x.date === date) || {}).places || []).slice(),
+      }));
+      albumCache = { list: merged };
       renderAlbum();
     } catch (e) {
       if (el.albumSummary) el.albumSummary.textContent = '加载失败：' + (e && e.message ? e.message : e);
