@@ -351,6 +351,8 @@ app.post('/api/config', (req, res) => {
   if (['city', 'china', 'world'].includes(body.scope)) config.scope = body.scope;
   if (typeof body.city === 'string' && body.city.trim()) config.city = body.city.trim();
   if (body.origin && Number.isFinite(body.origin.lng) && Number.isFinite(body.origin.lat)) {
+    // 记下"本机最后一次改出发点的时间"：同步时用它判断要不要用存档里的出发点覆盖本地
+    config.originSetAt = Date.now();
     // 经纬度范围校验，避免写入一个地球以外的坐标
     const lng = Math.max(-180, Math.min(180, Number(body.origin.lng)));
     const lat = Math.max(-85, Math.min(85, Number(body.origin.lat)));
@@ -1129,7 +1131,15 @@ app.post('/api/mailbox/pull', (req, res) => {
     }
     if (carried.city) config.city = String(carried.city);
     if (carried.origin && Number.isFinite(Number(carried.origin.lng)) && Number.isFinite(Number(carried.origin.lat))) {
-      config.origin = { lng: Number(carried.origin.lng), lat: Number(carried.origin.lat) };
+      // 只在「存档比本机这次改出发点的时间更新」时才覆盖 ——
+      // 否则会出现"我刚把出发点设成 X，同步一下又被改回旧位置"（和继续点是同一类坑）。
+      const localSetAt = Number(config.originSetAt) || 0;
+      const archAt = Number(imp.at) || 0;
+      if (!localSetAt || (archAt && archAt >= localSetAt)) {
+        config.origin = { lng: Number(carried.origin.lng), lat: Number(carried.origin.lat) };
+      } else {
+        logLine(`mailbox pull 跳过存档里的出发点（本机 ${new Date(localSetAt).toLocaleString('zh-CN')} 改过，存档 @${archAt ? new Date(archAt).toLocaleString('zh-CN') : '未知'}）`);
+      }
     }
     if (typeof carried.originCustom === 'boolean') config.originCustom = carried.originCustom;
     if (carried.originName) config.originName = String(carried.originName);

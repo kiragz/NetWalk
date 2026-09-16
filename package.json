@@ -1,6 +1,6 @@
 {
   "name": "netwalk",
-  "version": "0.9.44",
+  "version": "0.9.45",
   "private": true,
   "description": "网速与打字速度驱动的地图漫游挂机小游戏",
   "type": "commonjs",

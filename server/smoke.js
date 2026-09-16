@@ -178,6 +178,9 @@ p.planRoute(from, { lat: far.lat, lng: far.lng }).then(async (route) => {
   ok('存档码能携带本机配置', imp3.cfg && imp3.cfg.amapKey === 'K1' && imp3.cfg.mailPass === 'p', JSON.stringify(imp3.cfg));
   ok('导出的存档码未带配置时 cfg 为 null',
     importArchive(exp.code, s2, a2).cfg === null);
+  ok('importArchive 返回存档打包时间（供"谁更新"判断）',
+    typeof importArchive(exp.code, s2, a2).at === 'number' && importArchive(exp.code, s2, a2).at > 0,
+    String(importArchive(exp.code, s2, a2).at));
   try { importArchive('NW2.abcdef', s2, a2); ok(false, '错误前缀应报错'); }
   catch (_) { ok(true, '错误前缀被拒绝'); }
 

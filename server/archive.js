@@ -183,6 +183,8 @@ function importArchive(code, store, achStore, placeStore) {
   return {
     added, merged, total: added + merged, achievements: achCount,
     places: placesMerged,
+    at: Number(payload.at) || 0,          // 这份存档的打包时间（调用方据此判断"谁更新"）
+    machine: String(payload.machine || ''),
     resetTakeover: takeover,
     cfg: Object.keys(cfg).length ? cfg : null,
   };
