@@ -302,9 +302,9 @@
           }
         }
       }
-      // 路网未提供路名时用逆地理兜底（节流 8 秒）
+      // 路网未提供路名时用逆地理兜底（节流 15 秒：逆地理编码也算额度，别太频繁）
       const now = Date.now();
-      if (now - this._roadQueriedAt > 8000) {
+      if (now - this._roadQueriedAt > 15000) {
         this._roadQueriedAt = now;
         this.provider.roadAt(this.pos.lat, this.pos.lng).then((road) => {
           if (road && road !== this.road) { this.road = road; this.onLog(`走上 ${road}`); }

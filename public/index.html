@@ -443,6 +443,7 @@
       <button class="btn" id="btnRepairUndo" title="恢复成上一次区域修复之前的轨迹（只对修复过的当天有效）">↩ 撤销修复</button>
       <button class="btn" id="btnAlbum" title="查看路过收集的医院/学校/地标等正式地点">📔 地点收集册</button>
       <button class="btn" id="btnSessions" title="出发记录：指定从某次出发继续，或回滚删掉之后几次出发的轨迹">⏮ 出发记录</button>
+      <button class="btn" id="btnQuota" title="查看今天各项高德接口的用量与上限">🔍 用量诊断</button>
       <button class="btn primary" id="btnStatsClose" data-page-node-id="4VLyMIuq83vyRCqfbLb16P">关闭</button>
     </div>
   </div>
@@ -461,6 +462,19 @@
     <div class="modal-acts">
       <button class="btn primary" id="btnPickArcGo">用选中的这份同步</button>
       <button class="btn" id="btnPickArcCancel">取消</button>
+    </div>
+  </div>
+</div>
+
+<!-- 用量诊断（高德额度） -->
+<div class="modal-mask" id="maskQuota">
+  <div class="modal">
+    <h2>🔍 用量诊断</h2>
+    <div class="desc">高德是按<b>服务类型</b>分开算减免额度的。这里列出每一项今天用了多少、谁在用、还剩多少，并可现场调整上限。</div>
+    <div id="quotaBody" style="max-height:52vh;overflow:auto"></div>
+    <div class="modal-acts">
+      <button class="btn" id="btnQuotaSave" title="保存上面的每日上限">💾 保存上限</button>
+      <button class="btn primary" id="btnQuotaClose">关闭</button>
     </div>
   </div>
 </div>

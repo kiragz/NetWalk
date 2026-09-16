@@ -62,12 +62,64 @@
       this._roadAt = 0;
       this._ready = false;
       this._pickHandler = null;
-      // 每日调用软上限：个人认证开发者日配额 5000，留出余量
-      this._budget = Math.max(100, Number(opts.maxCallsPerDay) || 4000);
-      this._calls = { route: 0, geocode: 0 };
+      // 按「额度桶」分别设上限（高德是按服务类型分开计减免额度的）：
+      //   route  = 步行路径规划（走路必需，给足）
+      //   search = 基础搜索服务（周边/多边形搜索 POI）—— 只有收集册用，给得很紧
+      //   geocode= 地理/逆地理编码（路名兜底、地址搜索）
+      const q = opts.quota || {};
+      this._budgets = {
+        route: Math.max(50, Number(q.route) || 2000),
+        search: Math.max(0, Number(q.search) || 30),      // 默认很保守：避免再触到月额度
+        geocode: Math.max(0, Number(q.geocode) || 200),
+      };
+      // 月度硬闸：高德提醒/计费是按「月消耗量」，所以除了日上限，再加一道月度上限。
+      //   search 默认 800/月（约合高德个人认证减免额度的 1/6，留足余量给别的用途或别的程序）
+      //   0 = 不限
+      this._monthBudgets = {
+        route: Math.max(0, Number(q.routeMonth) || 0),
+        search: Math.max(0, Number(q.searchMonth) || 800),
+        geocode: Math.max(0, Number(q.geocodeMonth) || 0),
+      };
+      this._calls = { route: 0, search: 0, geocode: 0 };
+      this._monthCalls = { route: 0, search: 0, geocode: 0 };
       this._budgetWarned = false;
+      this._monthWarned = { route: false, search: false, geocode: false };
+      this._searchFallbackWarned = false;
       this.onBudgetWarning = null;
       this._loadCalls();
+      this._loadMonth();
+    }
+
+    // ---------- 月度计数（月额度才是被计费的那个，单独记一份） ----------
+    _monthKey() {
+      const d = new Date();
+      return `netwalk-amap-month-${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+    }
+
+    _loadMonth() {
+      try {
+        const raw = global.localStorage && global.localStorage.getItem(this._monthKey());
+        const s = raw ? JSON.parse(raw) : {};
+        this._monthCalls = {
+          route: Number(s.route) || 0,
+          search: Number(s.search) || 0,
+          geocode: Number(s.geocode) || 0,
+        };
+      } catch (_) { /* 读不到就从零算 */ }
+    }
+
+    _saveMonth() {
+      try {
+        global.localStorage && global.localStorage.setItem(this._monthKey(), JSON.stringify(this._monthCalls));
+      } catch (_) { /* 忽略写入失败 */ }
+    }
+
+    monthUsed(kind) { return Number(this._monthCalls[kind]) || 0; }
+
+    monthLeft(kind) {
+      const b = Number(this._monthBudgets[kind]);
+      if (!Number.isFinite(b) || b <= 0) return Infinity;   // 0 = 不限
+      return Math.max(0, b - this.monthUsed(kind));
     }
 
     // ---------- 调用量计数（按天持久化，防止打爆高德免费额度） ----------
@@ -80,7 +132,11 @@
       try {
         const raw = global.localStorage && global.localStorage.getItem(this._callsKey());
         const s = raw ? JSON.parse(raw) : {};
-        this._calls = { route: Number(s.route) || 0, geocode: Number(s.geocode) || 0 };
+        this._calls = {
+          route: Number(s.route) || 0,
+          search: Number(s.search) || 0,
+          geocode: Number(s.geocode) || 0,
+        };
       } catch (_) { /* 无 localStorage 时从 0 开始 */ }
     }
 
@@ -90,24 +146,58 @@
       } catch (_) { /* 忽略写入失败 */ }
     }
 
-    totalCalls() { return this._calls.route + this._calls.geocode; }
-    budgetLeft() { return Math.max(0, this._budget - this.totalCalls()); }
+    totalCalls() { return this._calls.route + this._calls.search + this._calls.geocode; }
 
-    callStats() {
-      return {
-        route: this._calls.route, geocode: this._calls.geocode,
-        total: this.totalCalls(), budget: this._budget, left: this.budgetLeft(),
-      };
+    /** 某个额度桶还剩多少（route / search / geocode） */
+    kindLeft(kind) {
+      const b = Number(this._budgets[kind]);
+      const used = Number(this._calls[kind]) || 0;
+      if (!Number.isFinite(b)) return 0;
+      return Math.max(0, b - used);
     }
 
-    /** 记一次调用；返回 false 表示已达今日软上限，调用方应跳过真实请求 */
+    budgetLeft() { return this.kindLeft('route') + this.kindLeft('search') + this.kindLeft('geocode'); }
+
+    callStats() {
+      const out = { total: this.totalCalls(), budget: this._budgets.route + this._budgets.search + this._budgets.geocode, left: this.budgetLeft() };
+      for (const k of ['route', 'search', 'geocode']) {
+        out[k] = this._calls[k] || 0;
+        out[k + 'Budget'] = this._budgets[k];
+        out[k + 'Left'] = this.kindLeft(k);
+        out[k + 'Month'] = this.monthUsed(k);
+        out[k + 'MonthBudget'] = this._monthBudgets[k];
+      }
+      return out;
+    }
+
+    /** 一句话说明当前调用量（给日志/设置面板用） */
+    quotaSummary() {
+      const st = this.callStats();
+      return `今日 路径 ${st.route}/${st.routeBudget} · 基础搜索 ${st.search}/${st.searchBudget} · 地理编码 ${st.geocode}/${st.geocodeBudget}`
+        + `；本月 基础搜索 ${st.searchMonth}${st.searchMonthBudget ? '/' + st.searchMonthBudget : ''}`;
+    }
+
+    /** 记一次调用；返回 false 表示这个额度桶（日或月）今天用完了，调用方应跳过真实请求 */
     _charge(kind) {
-      if (this.budgetLeft() <= 0) return false;
-      this._calls[kind] = (this._calls[kind] || 0) + 1;
+      const k = (kind === 'route') ? 'route' : (kind === 'search' ? 'search' : 'geocode');
+      if (this.kindLeft(k) <= 0) return false;      // 按桶分别限制：搜索用完了不会连累路线规划
+      if (this.monthLeft(k) <= 0) {                 // 月度硬闸：到量就彻底停，避免撞高德月度额度
+        if (!this._monthWarned[k]) {
+          this._monthWarned[k] = true;
+          const label = { route: '路径规划', search: '基础搜索', geocode: '地理编码' }[k] || k;
+          if (typeof this.onBudgetWarning === 'function') this.onBudgetWarning(this.callStats(), k, 'month');
+          else if (typeof console !== 'undefined') console.warn(`[NetWalk] 本月「${label}」调用已达自设上限，已停止该类调用`);
+        }
+        return false;
+      }
+      this._calls[k] = (this._calls[k] || 0) + 1;
+      this._monthCalls[k] = (this._monthCalls[k] || 0) + 1;
       this._saveCalls();
-      if (!this._budgetWarned && this.budgetLeft() <= this._budget * 0.1) {
+      this._saveMonth();
+      const left = this.kindLeft(k);
+      if (!this._budgetWarned && left <= Math.max(3, Math.round(this._budgets[k] * 0.1))) {
         this._budgetWarned = true;
-        if (typeof this.onBudgetWarning === 'function') this.onBudgetWarning(this.callStats());
+        if (typeof this.onBudgetWarning === 'function') this.onBudgetWarning(this.callStats(), k);
       }
       return true;
     }
@@ -331,6 +421,15 @@
       if (!force && now - this._roadAt < 5000 && this._lastRoad) {
         return Promise.resolve(this._lastRoad);
       }
+      // 同一片 ~55 米网格 20 分钟内不重复逆地理（逆地理编码有额度，来回走别重复烧）
+      const gk = `${Math.round(Number(lat) * 2000)}_${Math.round(Number(lng) * 2000)}`;
+      if (!force && this._roadCache && this._roadCache.has(gk)) {
+        const hit = this._roadCache.get(gk);
+        if (now - hit.t < 20 * 60 * 1000) {
+          this._lastRoad = hit.road || this._lastRoad;
+          return Promise.resolve(this._lastRoad);
+        }
+      }
       this._roadAt = now;
       return new Promise((resolve) => {
         if (!this._ready) return resolve(this._lastRoad || '');
@@ -346,6 +445,11 @@
               || (result.regeocode.roads && result.regeocode.roads[0] && result.regeocode.roads[0].name)
               || ac.township || '';
             this._lastRoad = road || this._lastRoad;
+            if (road) {
+              if (!this._roadCache) this._roadCache = new Map();
+              if (this._roadCache.size > 600) this._roadCache.clear();
+              this._roadCache.set(gk, { road, t: Date.now() });
+            }
             finish(this._lastRoad || '');
           });
         } catch (err) {
@@ -354,8 +458,11 @@
       });
     }
 
-    /** 逆地理取附近的正式场所 POI（医院/学校/地标等，供地点收集册用） */
-    nearbyPlaces(pos) {
+    /**
+     * 备用通道：用「逆地理编码」取附近 POI（走的是另一个额度桶）。
+     * 基础搜索服务额度用完时，收集册自动降级用它 —— 至少不至于完全采不到。
+     */
+    nearbyPlacesViaGeocode(pos) {
       return new Promise((resolve) => {
         if (!this._ready || !this.geocoder) return resolve([]);
         if (!this._charge('geocode')) return resolve([]);
@@ -372,11 +479,20 @@
       });
     }
 
-    /** 逆地理取附近的正式场所 POI（医院/学校/地标等，供地点收集册用） */
-    nearbyPlaces(pos) {
+    /** 取附近的正式场所 POI（基础搜索服务）。额度用完就停，**不自动改烧其他额度桶** */
+    async nearbyPlaces(pos) {
+      if (!this._ready || !this.placeSearch) return [];
+      if (this.kindLeft('search') <= 0 || this.monthLeft('search') <= 0) {
+        // 以前这里会自动降级去调「逆地理编码」——额度是省不下来的，只是换了个桶继续烧，
+        // 而且用户完全看不见。现在直接停，并只提示一次。
+        if (!this._searchFallbackWarned) {
+          this._searchFallbackWarned = true;
+          if (typeof this.onBudgetWarning === 'function') this.onBudgetWarning(this.callStats(), 'search', 'stop');
+        }
+        return [];
+      }
       return new Promise((resolve) => {
-        if (!this._ready || !this.placeSearch) return resolve([]);
-        if (!this._charge('geocode')) return resolve([]);
+        if (!this._charge('search')) return resolve([]);
         let done = false;
         const finish = (v) => { if (!done) { done = true; resolve(v); } };
         const timer = setTimeout(() => finish([]), 8000);
@@ -395,7 +511,7 @@
     searchFormalInBounds(bounds, type) {
       return new Promise((resolve) => {
         if (!this._ready || !this.placeSearch) return resolve([]);
-        if (!this._charge('geocode')) return resolve([]);
+        if (!this._charge('search')) return resolve([]);   // 补采也是基础搜索服务，受同一额度限制
         let done = false;
         const finish = (v) => { if (!done) { done = true; resolve(v); } };
         const timer = setTimeout(() => finish([]), 10000);

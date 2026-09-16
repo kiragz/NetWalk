@@ -101,6 +101,8 @@ const DEFAULT_CONFIG = {
   machineName: '',
   // 地点收集册：关闭后行走与补采都不再调用高德「基础搜索服务」，额度全留给路线规划
   placeAlbum: false,
+  // 每日调用上限（按高德的额度桶分开计）：route=路径规划、search=基础搜索服务、geocode=地理/逆地理编码
+  quota: { route: 2000, search: 30, geocode: 200 },
   // 下次出发强制从「设定出发点」开始（重置数据后自动置 true；出发一次后自动清掉）
   freshStart: false,
   // 高德每日调用软上限（路径规划 + 逆地理）。个人认证开发者日配额 5000，
@@ -355,6 +357,18 @@ app.post('/api/config', (req, res) => {
     if (was !== config.placeAlbum) {
       logLine(`地点收集册：${config.placeAlbum ? '开启' : '关闭'}（${config.placeAlbum ? '行走时会调用高德搜索服务' : '不再调用高德搜索服务'}）`);
     }
+  }
+  if (body.quota && typeof body.quota === 'object') {
+    const q = config.quota || {};
+    for (const k of ['route', 'search', 'geocode']) {
+      if (Number.isFinite(Number(body.quota[k]))) q[k] = Math.max(0, Math.round(Number(body.quota[k])));
+    }
+    // 月度上限（searchMonth/routeMonth/geocodeMonth）：0 = 不限
+    for (const k of ['routeMonth', 'searchMonth', 'geocodeMonth']) {
+      if (Number.isFinite(Number(body.quota[k]))) q[k] = Math.max(0, Math.round(Number(body.quota[k])));
+    }
+    config.quota = q;
+    logLine(`调用上限：route=${q.route} search=${q.search} geocode=${q.geocode}`);
   }
   if (body.provider === 'amap' || body.provider === 'drill') config.provider = body.provider;
   if (['city', 'china', 'world'].includes(body.scope)) config.scope = body.scope;

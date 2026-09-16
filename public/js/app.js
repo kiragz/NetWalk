@@ -107,6 +107,7 @@
     btnSessions: $('btnSessions'), maskSessions: $('maskSessions'), sessionsBody: $('sessionsBody'), sessionsResume: $('sessionsResume'),
     btnSessionsClose: $('btnSessionsClose'), btnSessionsResumeClear: $('btnSessionsResumeClear'), btnSessionsUseOrigin: $('btnSessionsUseOrigin'),
     maskPickArc: $('maskPickArc'), pickArcBody: $('pickArcBody'), btnPickArcGo: $('btnPickArcGo'), btnPickArcCancel: $('btnPickArcCancel'),
+    maskQuota: $('maskQuota'), quotaBody: $('quotaBody'), btnQuota: $('btnQuota'), btnQuotaSave: $('btnQuotaSave'), btnQuotaClose: $('btnQuotaClose'),
     maskSyncFirst: $('maskSyncFirst'), btnSyncFirstGo: $('btnSyncFirstGo'), btnSyncFirstSkip: $('btnSyncFirstSkip'), syncFirstHint: $('syncFirstHint'),
     btnRepairArea: $('btnRepairArea'), btnRepairGo: $('btnRepairGo'), btnRepairCancel: $('btnRepairCancel'),
     repairInfo: $('repairInfo'), repairBar: $('repairBar'), pickBox: $('pickBox'), netBanner: $('netBanner'),
@@ -730,9 +731,20 @@
           securityJsCode: mk.securityJsCode || '',
           zoom: 16,
           maxCallsPerDay: Number(state.cfg.amapMaxCallsPerDay) || 4000,
+          quota: state.cfg.quota || { route: 2000, search: 30, geocode: 200 },
         });
-        p.onBudgetWarning = (st) => {
-          log(`⚠ 高德今日调用已用 ${st.total}/${st.budget}，接近上限后会退化为直线推进（不影响玩法）`);
+        p.onBudgetWarning = (st, kind, reason) => {
+          const label = kind === 'search' ? '基础搜索服务（收集册）' : (kind === 'geocode' ? '地理/逆地理编码' : '路径规划');
+          if (reason === 'month') {
+            log(`🛑 高德「${label}」本月调用已达自设上限（${st[kind + 'Month']}/${st[kind + 'MonthBudget']}），`
+              + '已停止该类调用，避免撞高德月度额度。可在 ⚙ 设置 → 高德调用量上限里调整。');
+            return;
+          }
+          if (reason === 'stop') {
+            log(`ℹ 高德「${label}」今日额度已用完，本次行走不再搜索地点（不影响走路与轨迹）。`);
+            return;
+          }
+          log(`⚠ 高德「${label}」今日额度快用完了（${st[kind]}/${st[kind + 'Budget']}）—— 用完后该项功能会自动跳过，不影响走路`);
         };
         await p.init(el.map, { center: origin });
         state.provider = p;
@@ -766,12 +778,13 @@
     }
   }
 
-  /** DOCK 里的高德调用量（按天累计，用于盯住免费额度） */
+  /** DOCK 里的高德调用量（按额度桶分开显示，一眼看清「基础搜索」有没有在动） */
   function updateAmapCalls() {
     const p = state.provider;
     if (!p || typeof p.callStats !== 'function') return;
     const st = p.callStats();
     el.mAmap.textContent = `${st.total} / ${st.budget}`;
+    el.mAmap.title = p.quotaSummary ? p.quotaSummary() : '';
     el.mAmap.style.color = st.left <= 0 ? 'var(--hot)' : (st.left <= st.budget * 0.1 ? 'var(--warn)' : '');
   }
 
@@ -2059,6 +2072,95 @@
     } catch (e) { log('取消失败：' + (e && e.message ? e.message : e)); }
   }
 
+  // ---------- 用量诊断：按高德的额度桶分别统计 ----------
+  const QUOTA_KINDS = [
+    {
+      key: 'route', name: '步行路径规划', icon: '🚶',
+      who: '走路必需：每走完一段（约 250 米）规划一次下一段。用完会自动退化为直线推进（玩法不受影响）。',
+    },
+    {
+      key: 'search', name: '基础搜索服务（周边/多边形搜索 POI）', icon: '🔎',
+      who: '只有「📔 地点收集册」用（行走采集 + 重溯补采）。这是你收到 80% 告警的那一项，默认只给很小的额度。',
+    },
+    {
+      key: 'geocode', name: '地理/逆地理编码', icon: '📍',
+      who: '路名兜底（路网没给路名时）、设置里搜地址定位。已做 55 米网格缓存，来回走不重复消耗。',
+    },
+  ];
+
+  async function openQuota() {
+    if (el.maskQuota) el.maskQuota.classList.add('show');
+    if (el.quotaBody) el.quotaBody.innerHTML = '<div class="hint">读取中…</div>';
+    let st = null;
+    if (state.provider && typeof state.provider.callStats === 'function') st = state.provider.callStats();
+    let scanned = 0;
+    try { const s = await fetchJson('/api/places/scan-stats?date=' + today(), 5000); scanned = Number(s && s.searched) || 0; } catch (_) { /* noop */ }
+    if (!el.quotaBody) return;
+    if (!st) {
+      el.quotaBody.innerHTML = '<div class="hint">当前是演练模式（没用高德），没有调用量。</div>';
+      return;
+    }
+    const albumOn = albumEnabled();
+    el.quotaBody.innerHTML = QUOTA_KINDS.map((k) => {
+      const used = st[k.key] || 0;
+      const budget = st[k.key + 'Budget'] || 0;
+      const left = st[k.key + 'Left'] || 0;
+      const pct = budget ? Math.min(100, Math.round(used / budget * 100)) : 0;
+      const mUsed = st[k.key + 'Month'] || 0;
+      const mBudget = st[k.key + 'MonthBudget'] || 0;
+      const mPct = mBudget ? Math.min(100, Math.round(mUsed / mBudget * 100)) : 0;
+      const bar = `<div style="height:6px;background:rgba(127,127,127,.25);border-radius:3px;overflow:hidden;margin:4px 0">
+        <div style="height:100%;width:${pct}%;background:${pct > 80 ? 'var(--hot,#ff5c5c)' : (pct > 50 ? 'var(--warn,#ffb648)' : 'var(--ok,#3ddc97)')}"></div></div>`;
+      const mBar = mBudget ? `<div style="height:6px;background:rgba(127,127,127,.25);border-radius:3px;overflow:hidden;margin:4px 0">
+        <div style="height:100%;width:${mPct}%;background:${mPct > 80 ? 'var(--hot,#ff5c5c)' : (mPct > 50 ? 'var(--warn,#ffb648)' : 'var(--ok,#3ddc97)')}"></div></div>` : '';
+      const extra = k.key === 'search'
+        ? `<div style="opacity:.7;font-size:12px">收集册：${albumOn ? '已开启（会调用）' : '<b>已关闭（0 调用）</b>'} · 今天已认领网格 ${scanned} 片</div>`
+        : '';
+      return `<div style="padding:8px 0;border-bottom:1px solid rgba(127,127,127,.14)">
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px">
+          <b>${k.icon} ${k.name}</b>
+          <span style="white-space:nowrap">今日 ${used} / <input type="number" min="0" step="10" value="${budget}"
+            data-quota="${k.key}" style="width:76px" /> 剩余 ${left}</span>
+        </div>
+        ${bar}
+        <div style="display:flex;justify-content:space-between;align-items:center;gap:8px;margin-top:4px">
+          <span style="opacity:.8;font-size:12px">本月已用 <b>${mUsed}</b>${mBudget ? ` / ${mBudget}` : ''}${mBudget ? '（到这个数就彻底停，避免撞高德月额度）' : '（不限）'}</span>
+          <span style="white-space:nowrap;font-size:12px">月上限 <input type="number" min="0" step="100" value="${mBudget}"
+            data-quota-month="${k.key}" style="width:86px" /> <span style="opacity:.6">0=不限</span></span>
+        </div>
+        ${mBar}
+        <div style="opacity:.75;font-size:12px">${k.who}</div>
+        ${extra}
+      </div>`;
+    }).join('') + '<div class="hint" style="margin-top:8px">每天零点日计数归零；<b>月计数按自然月累计</b>，到月上限后该类调用彻底停止（高德提醒/计费看的是月消耗量，所以这道闸最关键）。与高德后台的实际数字会有少量差异，留余量更稳。</div>';
+  }
+
+  async function saveQuota() {
+    if (!el.quotaBody) return;
+    const quota = {};
+    el.quotaBody.querySelectorAll('[data-quota]').forEach((inp) => {
+      quota[inp.dataset.quota] = Math.max(0, Number(inp.value) || 0);
+    });
+    el.quotaBody.querySelectorAll('[data-quota-month]').forEach((inp) => {
+      quota[inp.dataset.quotaMonth + 'Month'] = Math.max(0, Number(inp.value) || 0);
+    });
+    try {
+      const r = await postJson('/api/config', { quota }, 8000);
+      if (r && r.ok) {
+        if (state.cfg) state.cfg.quota = Object.assign({}, state.cfg.quota, quota);
+        const p = state.provider;
+        if (p && p._budgets) {
+          for (const k of ['route', 'search', 'geocode']) {
+            if (Number.isFinite(quota[k])) p._budgets[k] = quota[k];
+            if (Number.isFinite(quota[k + 'Month'])) p._monthBudgets[k] = quota[k + 'Month'];
+          }
+        }
+        log(`💾 调用上限已保存：今日 路径 ${quota.route} / 搜索 ${quota.search} / 地理编码 ${quota.geocode}`
+          + `；本月 搜索 ${quota.searchMonth != null ? quota.searchMonth : '不限'}`);
+      }
+    } catch (e) { log('保存失败：' + (e && e.message ? e.message : e)); }
+  }
+
   /** 设置里显示「下次是否从设定出发点出发」的状态 */
   function renderFreshStartHint() {
     if (!el.freshStartHint) return;
@@ -2975,6 +3077,10 @@
 
     // 出发记录：指定继续点 / 回滚 / 单次删除
     if (el.btnSessions) el.btnSessions.addEventListener('click', () => { openSessions().catch(() => {}); });
+    if (el.btnQuota) el.btnQuota.addEventListener('click', () => { openQuota().catch(() => {}); });
+    if (el.btnQuotaClose) el.btnQuotaClose.addEventListener('click', () => { if (el.maskQuota) el.maskQuota.classList.remove('show'); });
+    if (el.maskQuota) el.maskQuota.addEventListener('click', (e) => { if (e.target === el.maskQuota) el.maskQuota.classList.remove('show'); });
+    if (el.btnQuotaSave) el.btnQuotaSave.addEventListener('click', () => { saveQuota().catch(() => {}); });
     if (el.btnSessionsClose) el.btnSessionsClose.addEventListener('click', () => { if (el.maskSessions) el.maskSessions.classList.remove('show'); });
     if (el.maskSessions) el.maskSessions.addEventListener('click', (e) => { if (e.target === el.maskSessions) el.maskSessions.classList.remove('show'); });
     if (el.btnSessionsResumeClear) el.btnSessionsResumeClear.addEventListener('click', () => { clearResumePoint().catch(() => {}); });
