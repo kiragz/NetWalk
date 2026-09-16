@@ -45,6 +45,7 @@
     ovSummary: $('ovSummary'), ovSvg: $('ovSvg'),
     cfgKey: $('cfgKey'), cfgSec: $('cfgSec'), cfgCity: $('cfgCity'), cfgScope: $('cfgScope'), cfgMachineName: $('cfgMachineName'),
     btnFreshStart: $('btnFreshStart'), freshStartHint: $('freshStartHint'),
+    cfgAlbumOn: $('cfgAlbumOn'), albumQuotaHint: $('albumQuotaHint'),
     keyNotice: $('keyNotice'),
     btnSaveCfg: $('btnSaveCfg'), btnCloseCfg: $('btnCloseCfg'),
     // 老板键
@@ -345,6 +346,18 @@
         el.cfgMachineName.value = mn;
         el.cfgMachineName.placeholder = mn ? mn : '留空则用电脑主机名';
       }
+      // 收集册开关 + 今天的搜索量（省额度时看这个）
+      if (el.cfgAlbumOn) el.cfgAlbumOn.checked = albumEnabled();
+      if (el.albumQuotaHint) {
+        try {
+          const st = await fetchJson('/api/places/scan-stats?date=' + today(), 5000);
+          if (st && Number.isFinite(st.searched)) {
+            el.albumQuotaHint.textContent = st.searched
+              ? `开启后同一天、同一片区域只搜一次（重走不重复花额度）。今天已搜 ${st.searched} 片区域。关闭时不调用高德搜索，最省额度。数据不会被删除，随时可再打开。`
+              : '关闭时不调用高德搜索，最省额度；开启后同一天、同一片区域只搜一次。数据不会被删除，随时可再打开。';
+          }
+        } catch (_) { /* 取不到就保留默认文案 */ }
+      }
     } catch (_) { /* noop */ }
   }
 
@@ -600,6 +613,7 @@
   async function boot() {
     const res = await fetch('/api/config');
     state.cfg = await res.json();
+    applyAlbumVisibility();        // 收集册开关：关闭时藏掉入口、停掉采集（不调高德搜索）
     const city = CITIES[state.cfg.city] ? state.cfg.city : '深圳';
     // 真正采用配置里的出发点（此前 cfg.origin 被保存却从未被前端读取）
     const useCustom = Boolean(state.cfg.originCustom) && isFiniteLatLng(state.cfg.origin);
@@ -635,6 +649,9 @@
       collectPlacesNow,
       scanAlongRoad,
       roadSearchPoints,
+      claimGrids,
+      albumEnabled,
+      applyAlbumVisibility,
       startPlaceCollector,
       stopPlaceCollector,
       findLastPosition,
@@ -1676,10 +1693,31 @@
   }
 
   /**
+   * 向服务端认领网格：只返回「今天还没搜过」的点，客户端只对它们调高德。
+   * 服务端不可用/没配置时退回本地去重（宁可少搜，也不重复烧额度）。
+   */
+  async function claimGrids(points) {
+    const keys = points.map((p) => `${p.lat.toFixed(3)}|${p.lng.toFixed(3)}|${roadGridKey(p)}`);
+    try {
+      const r = await postJson('/api/places/scan-claim', { date: today(), keys }, 6000);
+      if (r && r.ok && Array.isArray(r.fresh)) {
+        const set = new Set(r.fresh);
+        return points.filter((p, i) => set.has(keys[i]));
+      }
+    } catch (_) { /* 退回本地去重 */ }
+    // 本地兜底：用内存里的已搜集合过滤（重开一次会话可能会重复搜一次，但不至于失控）
+    if (!state.localScanned) state.localScanned = new Set();
+    const out = [];
+    points.forEach((p, i) => { if (!state.localScanned.has(keys[i])) { state.localScanned.add(keys[i]); out.push(p); } });
+    return out;
+  }
+
+  /**
    * 沿当前所在的路搜索目标地点：每约 130 米取一个搜索点（最多 maxPts 个），
    * 结果只留到这条路 ≤100 米的正式场所，归到这条路名下。
    */
   async function scanAlongRoad(road, maxPts) {
+    if (!albumEnabled()) return;                       // 收集册已关闭：不发搜索请求
     if (!road || !state.started || !state.provider || state.provider.name !== 'amap') return;
     if (!state.roadScanned) state.roadScanned = new Map();
     let seen = state.roadScanned.get(road);
@@ -1694,8 +1732,11 @@
       if (cand.length >= (maxPts || 5)) break;
     }
     if (!cand.length) return;
+    // 服务端过滤：今天已经搜过的那片区域直接跳过（这才是真正省额度的地方）
+    const fresh = await claimGrids(cand);
+    if (!fresh.length) return;
     let added = 0;
-    for (const c of cand) {
+    for (const c of fresh) {
       try {
         const pois = await state.provider.nearbyPlaces(c);
         const list = pickFormalPois(pois, c, road);
@@ -1711,11 +1752,26 @@
     }
   }
 
+  /** 收集册是否开启（关闭 = 不调高德搜索服务，额度全留给路线规划） */
+  function albumEnabled() { return !(state.cfg && state.cfg.placeAlbum === false); }
+
+  /** 按收集册开关显隐相关入口（直达按钮 / 数据面板入口 / 补采按钮） */
+  function applyAlbumVisibility() {
+    const on = albumEnabled();
+    for (const el2 of [el.btnAlbumQuick, el.btnAlbum, el.btnAlbumBackfill]) {
+      if (el2) el2.style.display = on ? '' : 'none';
+    }
+    if (!on && el.maskAlbum) el.maskAlbum.classList.remove('show');
+  }
+
   /** 采集一次：以当前位置搜路两侧 100 米内的正式场所，归到当前所在路名下 */
   async function collectPlacesNow(force) {
+    if (!albumEnabled()) return;                       // 收集册已关闭：一个搜索请求都不发
     if (!state.started || !state.provider || state.provider.name !== 'amap') return;
     const pos = (state.engine && state.engine.pos) || null;
     if (!pos || !Number.isFinite(pos.lat)) return;
+    // 同一片 ~130 米区域今天搜过就不再搜（省额度）
+    if (!(await claimGrids([pos])).length) return;
     if (!force && state.lastCollectPos) {
       const moved = haversineKm(state.lastCollectPos, pos) * 1000;
       if (moved < 40) return;   // 走动 40 米就再采一次（原来 100 米，走一段路才更新一次，显得"不刷新"）
@@ -1753,14 +1809,19 @@
 
   function startPlaceCollector() {
     stopPlaceCollector();
-    // 每 15 秒：① 当前位置 100 米内采一次 ② 沿当前路补扫还没搜过的路段（每次最多 2 点，慢慢铺满整条路）
+    if (!albumEnabled()) {          // 收集册关闭：完全不启动采集（也不调高德搜索）
+      log('📔 收集册已关闭：本次行走不调用高德搜索服务（额度全留给路线规划）。需要时到 ⚙ 设置里打开。');
+      return;
+    }
+    // 每 20 秒：① 当前位置 100 米内采一次 ② 沿当前路补扫还没搜过的路段（每次最多 1 点）
+    // 真正的节流靠服务端的「当天同区域只搜一次」，这里只是尝试频率。
     state.poiTimer = setInterval(() => {
       collectPlacesNow(false);
       const road = (state.engine && state.engine.road) || '';
-      if (road) scanAlongRoad(road, 2);
+      if (road) scanAlongRoad(road, 1);
       // 收集册开着就顺手刷一下（不用关掉再开）
       if (el.maskAlbum && el.maskAlbum.classList.contains('show')) refreshAlbumIfOpen();
-    }, 15000);
+    }, 20000);
     state.lastRoad = '';
     state.roadScanned = new Map();
     setTimeout(() => collectPlacesNow(true), 6000);                        // 出发后 6 秒先采一次
@@ -1778,6 +1839,7 @@
   function albumCatIcon(cat) { return CAT_ICONS[cat] || '📍'; }
 
   async function openAlbum() {
+    if (!albumEnabled()) { if (el.maskAlbum) el.maskAlbum.classList.remove('show'); return; }
     if (el.maskAlbum) el.maskAlbum.classList.add('show');
     if (el.albumSummary) el.albumSummary.textContent = '加载中…';
     if (el.albumBody) el.albumBody.innerHTML = '<div class="hint">加载中…</div>';
@@ -2053,11 +2115,11 @@
     el.mLit.textContent = `${s.litCells || 0} 块`;
     updateAmapCalls();
 
-    // 走到新的一条路 → 立刻按这条路采集：当前位置 100 米内 + 这条路沿途（最多 5 个搜索点）
+    // 走到新的一条路 → 立刻按这条路采集：当前位置 100 米内 + 这条路沿途（最多 3 个搜索点）
     if (state.started && s.road && s.road !== state.lastRoad) {
       state.lastRoad = s.road;
       collectPlacesNow(true);
-      scanAlongRoad(s.road, 5);
+      scanAlongRoad(s.road, 3);
     }
 
     const t = s.totals || { rx: 0, tx: 0, keys: 0 };
@@ -2136,6 +2198,7 @@
 
   /** 重溯补采：按当天走过的每条路搜索，只收「路两侧 100 米内」的正式场所（对齐周边设施口径，拒绝包围盒式的宽泛统计） */
   async function backfillDay(date) {
+    if (!albumEnabled()) { log('⚠ 收集册已关闭：补采会调用高德搜索服务。需要时到 ⚙ 设置里打开「📔 地点收集册」。'); return; }
     if (!state.provider || state.provider.name !== 'amap') { log('⚠ 补采需要高德模式（在线）'); return; }
     const day = (await loadAllDays()).find((d) => d.date === date);
     const path = (day && day.path) || [];
@@ -3514,6 +3577,8 @@ el.btnReport.addEventListener('click', () => {
       };
       // 本机名称：只用于存档邮件区分设备（留空 = 用主机名）
       if (el.cfgMachineName) body.machineName = el.cfgMachineName.value.trim().slice(0, 24);
+      // 地点收集册开关（关了就不再调用高德的搜索服务）
+      if (el.cfgAlbumOn) body.placeAlbum = el.cfgAlbumOn.checked;
       // 只有确定有 Key 才下发 amapKey/provider：
       // 否则"输入框为空 + savedKey 还没回填完成"时会把 Key 清成空串、provider 打回 drill，
       // 表现为"重置/保存设置后地图变虚拟路网"。

@@ -114,6 +114,7 @@ const SESSION_POSTS = [];  // 记录 session 相关 POST（回滚 / 单删 / 取
 let ARCHIVES_STUB = [];    // /api/mailbox/archives 候选存档桩
 const PULL_BODIES = [];    // 记录 /api/mailbox/pull 的请求体（校验选了哪一封）
 let D_FRESH = false;       // /api/session/use-origin 桩：记录"下次从设定出发点出发"状态
+const SCANNED = new Set(); // 已认领的搜索网格（服务端 scan-claim 桩）
 let LASTPOS_AT = Date.now();   // /api/lastpos 返回的最新点时间戳（校验"指定继续点是否过期"）
 win.fetch = function (url, opt) {
   const u = String(url);
@@ -147,6 +148,16 @@ win.fetch = function (url, opt) {
   if (u.indexOf('/api/archive/export') === 0) return json({ ok: true, code: 'NW1.' + 'A'.repeat(300), days: 3, bytes: 7080, rawBytes: 44764 });
   if (u.indexOf('/api/archive/import') === 0) return json({ ok: true, added: 1, merged: 2, days: 4, achievements: { newly: [], unlocked: {}, total: 36, got: 4 } });
   if (u.indexOf('/api/session/end') === 0) return json({ ok: true, date: TODAY, achievements: { newly: ['dist_5k'], unlocked: {}, total: 36, got: 5 }, mail: MAIL_STUB });
+  if (u.indexOf('/api/places/scan-claim') === 0) {
+    try {
+      const b = JSON.parse(opt.body || '{}');
+      const keys = (b.keys || []).map(String);
+      const fresh = keys.filter((k) => !SCANNED.has(k));
+      fresh.forEach((k) => SCANNED.add(k));
+      return json({ ok: true, fresh, known: keys.length - fresh.length, todayTotal: SCANNED.size });
+    } catch (_) { return json({ ok: true, fresh: [] }); }
+  }
+  if (u.indexOf('/api/places/scan-stats') === 0) return json({ ok: true, date: TODAY, searched: SCANNED.size });
   if (u.indexOf('/api/sessions') === 0) return json(SESSIONS_STUB);
   if (u.indexOf('/api/session/rollback') === 0) {
     let body = {};
@@ -963,10 +974,13 @@ const shown = (id) => $(id).classList.contains('show');
   ok('健身房等商业设施被过滤', !!sent && !sent.places.some((p) => /健身/.test(p.name)),
     sent ? sent.places.map((p) => p.name).join('、') : '无');
   ok('日志显示收集到的地点', $('logList').textContent.indexOf('📔 收集到') >= 0);
-  // 换路触发采集：road 变化 → 立即采一次
+  // 换路触发采集：road 变化 → 立即采一次（位置也移动，否则会被"同一片区域今天已搜过"挡掉）
   PLACES_POSTS.length = 0;
   D.state.engine.road = '林和中路';
+  D.state.engine.pos = { lat: 22.5431, lng: 114.0679 };   // 走到新位置的另一条路
   D.state.lastCollectAt = 0;
+  D.state.lastCollectPos = null;
+  D.state.localScanned = null;
   await D.collectPlacesNow(true);
   await sleep(80);
   const sent2 = byRoad('林和中路').slice(-1)[0] || null;
@@ -1235,6 +1249,51 @@ const shown = (id) => $(id).classList.contains('show');
   ok('打开开关后忽略存档里的旧位置（返回 null → 用设定出发点）', posFresh2 === null, JSON.stringify(posFresh2));
   ok('日志说明本次从设定出发点出发', $('logList').textContent.indexOf('本次从设定出发点出发') >= 0);
   D4.state.cfg.freshStart = false;
+
+  // Z：收集册总开关（关闭 = 一个高德搜索请求都不发）+ 同区域当天只搜一次
+  console.log('\n== Z. 收集册开关与额度保护 ==');
+  const D5 = win.NetWalkDebug;
+  D5.stopPlaceCollector();
+  try { if (D5.state.lastEngineRef && typeof D5.state.lastEngineRef.stop === 'function') D5.state.lastEngineRef.stop(); } catch (_) {}
+  D5.state.cfg = D5.state.cfg || {};
+  const before = SCANNED.size;
+  D5.state.cfg.placeAlbum = false;      // 关闭
+  D5.applyAlbumVisibility();
+  ok('关闭后隐藏收集册入口（直达按钮 / 数据面板入口 / 补采按钮）',
+    $('btnAlbumQuick').style.display === 'none' && $('btnAlbum').style.display === 'none'
+    && $('btnAlbumBackfill').style.display === 'none');
+  ap._ready = true;
+  D5.state.provider = ap;
+  D5.state.started = true;
+  D5.state.engine = { pos: { lat: 23.9, lng: 113.9 }, road: '测试路' };
+  PLACES_POSTS.length = 0;
+  await D5.collectPlacesNow(true);
+  await D5.scanAlongRoad('测试路', 3);
+  await D5.backfillDay(TODAY);
+  await sleep(120);
+  ok('关闭后不发任何地点上报', PLACES_POSTS.length === 0, JSON.stringify(PLACES_POSTS.slice(0, 2)));
+  ok('关闭后补采被拦下并提示', $('logList').textContent.indexOf('收集册已关闭') >= 0);
+  ok('关闭后不占用搜索网格', SCANNED.size === before, `${SCANNED.size} vs ${before}`);
+  // 重新打开 → 入口恢复、采集恢复
+  D5.state.cfg.placeAlbum = true;
+  D5.applyAlbumVisibility();
+  ok('重新打开后入口恢复', $('btnAlbumQuick').style.display !== 'none' && $('btnAlbumBackfill').style.display !== 'none');
+  D5.state.localScanned = null;
+  PLACES_POSTS.length = 0;
+  await D5.collectPlacesNow(true);
+  await sleep(120);
+  ok('重新打开后恢复采集', PLACES_POSTS.length > 0, JSON.stringify(PLACES_POSTS.length));
+  // 同一片区域当天不重复搜（省额度的关键）
+  PLACES_POSTS.length = 0;
+  await D5.collectPlacesNow(true);   // 同一位置再次触发
+  await sleep(120);
+  ok('同一片区域当天只搜一次（不再上报）', PLACES_POSTS.length === 0, JSON.stringify(PLACES_POSTS.length));
+  ok('认领接口被使用过（服务端去重）', SCANNED.size > before, `已认领 ${SCANNED.size} 片`);
+  D5.state.started = false;
+  D5.state.provider = null;
+  D5.state.engine = null;
+  D5.state.cfg.placeAlbum = false;   // 测试收尾默认关闭，避免影响其它小节
+  D5.applyAlbumVisibility();
   // ② 出发记录面板里的按钮 + 状态显示
   SESSION_POSTS.length = 0;
   $('btnSessions').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
@@ -1253,6 +1312,7 @@ const shown = (id) => $(id).classList.contains('show');
   ok('设置里显示「已设置」状态', $('freshStartHint').textContent.indexOf('已设置') >= 0, $('freshStartHint').textContent);
   $('btnSettingsClose') && $('btnSettingsClose').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
   D4.state.cfg.freshStart = false;
+  
 
   console.log('\n===== UI 测试结果：' + pass + ' 通过 / ' + fail + ' 失败 =====');
   if (errors.length) { console.log('\n捕获到的错误：'); errors.slice(0, 10).forEach((e) => console.log('  - ' + e)); }

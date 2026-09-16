@@ -28,7 +28,7 @@
   <header class="topbar" data-page-node-id="ddrJhtR5e5RhxcM4HEN3M4">
     <div class="brand" data-page-node-id="8DH2ofHV66qbHEOc2uAOXh">Net<span data-page-node-id="Gt7m3YCBqixEngqyYKio6f">Walk</span></div>
     <button class="ver-pill" id="btnAccount" title="账号与档案">👤 未登录</button>
-    <button class="ver-pill" id="btnVersion" title="查看版本更新概要">v0.9.45</button>
+    <button class="ver-pill" id="btnVersion" title="查看版本更新概要">v0.9.46</button>
     <div class="pill" id="pillMap" data-page-node-id="GjTS25Bi1mrlBafIXfCBl3">地图加载中</div>
     <div class="pill" id="pillNet" data-page-node-id="Snjd11zKSBJFXSszeLhDMN">网络采集中</div>
     <div class="pill" id="pillKey" data-page-node-id="h2AOMKNxwH67HjkAsxSCgU">击键采集中</div>
@@ -146,6 +146,15 @@
         <span class="hint" id="secHint" style="flex:1;margin:0"></span>
       </div>
       <div class="hint" data-page-node-id="QqemceEIWlMuiYKc2eXhgK">在高德控制台与 Key <b>一起生成、但值不同</b>（不要填成 Key 本身，否则地址解析会一直超时）。留空保持不变；<b>地址解析超时</b>时可点上面「清除安全密钥」试一次——若你的 Key 没开「静态安全密钥」，填了反而会被拒。</div>
+    </div>
+
+    <div class="field">
+      <label>地点收集册（关闭后不再调用高德的「基础搜索服务」，额度全留给路线规划）</label>
+      <label style="display:flex;align-items:center;gap:8px;font-weight:400">
+        <input type="checkbox" id="cfgAlbumOn" style="width:16px;height:16px"/>
+        <span>开启「📔 地点收集册」：行走时自动收录路过的医院/学校/车站等正式地点</span>
+      </label>
+      <div class="hint" id="albumQuotaHint">关闭时不调用高德搜索，最省额度；开启后同一天、同一片区域只搜一次（重走不重复花额度），今天已搜 0 片区域。数据不会被删除，随时可以再打开。</div>
     </div>
 
     <div class="field">

@@ -279,6 +279,15 @@ p.planRoute(from, { lat: far.lat, lng: far.lng }).then(async (route) => {
   ok(pr.removeSince(2000) === 1, '收集册按时间清掉回滚点之后的地点');
   ok((pr.load().days['2026-09-15'] || []).every((p) => p.name === '早收录'), '保留的是回滚点之前的地点');
   ok(pr.removeSince(0) === 0, 'cutoff 为 0 时不动数据（防误删）');
+  // 搜索网格认领：同一片区域当天只认领一次（省高德额度）
+  const c1 = pr.claimScan('2026-09-15', ['a', 'b', 'c']);
+  ok(c1.fresh.length === 3 && c1.known === 0, '首次认领全部为新', JSON.stringify(c1));
+  const c2 = pr.claimScan('2026-09-15', ['a', 'b', 'd']);
+  ok(c2.fresh.length === 1 && c2.fresh[0] === 'd' && c2.known === 2, '已认领过的不再返回', JSON.stringify(c2));
+  ok(pr.scanCount('2026-09-15') === 4, '今日已搜网格数累计正确', String(pr.scanCount('2026-09-15')));
+  ok(pr.claimScan('2026-09-16', ['a']).fresh.length === 1, '换一天重新认领');
+  pr.clearAll();
+  ok(pr.scanCount('2026-09-15') === 0, '清空收集册时搜索记录一并清空');
 
   console.log('\n== 8. 聚合统计 ==');
   const agg = s2.aggregate();

@@ -99,6 +99,8 @@ const DEFAULT_CONFIG = {
   originName: '',
   // 本机名称：存档邮件主题/正文里用它区分是哪台设备（留空则用主机名）
   machineName: '',
+  // 地点收集册：关闭后行走与补采都不再调用高德「基础搜索服务」，额度全留给路线规划
+  placeAlbum: false,
   // 下次出发强制从「设定出发点」开始（重置数据后自动置 true；出发一次后自动清掉）
   freshStart: false,
   // 高德每日调用软上限（路径规划 + 逆地理）。个人认证开发者日配额 5000，
@@ -346,6 +348,13 @@ app.post('/api/config', (req, res) => {
   if (body.freshStart !== undefined) {
     config.freshStart = Boolean(body.freshStart);
     if (config.freshStart) config.resumePoint = null;   // 与"指定继续点"互斥
+  }
+  if (body.placeAlbum !== undefined) {
+    const was = config.placeAlbum !== false;
+    config.placeAlbum = Boolean(body.placeAlbum);
+    if (was !== config.placeAlbum) {
+      logLine(`地点收集册：${config.placeAlbum ? '开启' : '关闭'}（${config.placeAlbum ? '行走时会调用高德搜索服务' : '不再调用高德搜索服务'}）`);
+    }
   }
   if (body.provider === 'amap' || body.provider === 'drill') config.provider = body.provider;
   if (['city', 'china', 'world'].includes(body.scope)) config.scope = body.scope;
@@ -800,6 +809,21 @@ app.get('/api/places/summary', (req, res) => {
   const to = String(req.query.to || todayStr()).slice(0, 10);
   const from = String(req.query.from || to).slice(0, 10);
   res.json(placeStore.summary(from, to));
+});
+
+/**
+ * 认领搜索网格：客户端在调高德搜索前先问一次"今天这片区域搜过没"，
+ * 搜过的直接跳过 —— 同一天重走同一条路、来回走都不会重复消耗额度。
+ */
+app.post('/api/places/scan-claim', (req, res) => {
+  const body = req.body || {};
+  res.json({ ok: true, ...placeStore.claimScan(body.date || todayStr(), body.keys || []) });
+});
+
+/** 今天已搜索过的网格数（设置里展示，方便盯额度） */
+app.get('/api/places/scan-stats', (req, res) => {
+  const date = String(req.query.date || todayStr());
+  res.json({ ok: true, date, searched: placeStore.scanCount(date) });
 });
 app.get('/api/sessions', (req, res) => {
   res.json({ ok: true, starts: store.allSessionStarts(), resume: config.resumePoint || null });

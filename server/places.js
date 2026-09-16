@@ -63,6 +63,64 @@ class PlaceStore {
   /** 清空全部收录（重置 / 对端重置接管时用） */
   clearAll() {
     this.save({ v: 1, days: {} });
+    try { this.saveScan({ v: 1, days: {} }); } catch (_) { /* 搜索记录一并清空 */ }
+  }
+
+  // ---------- 已搜索网格记录：省高德额度（同一天同一片区域只搜一次） ----------
+
+  /** 记录文件路径（与 places.json 同目录） */
+  _scanPath() { return path.join(this.dir, 'places-scan.json'); }
+
+  loadScan() {
+    try {
+      const j = JSON.parse(fs.readFileSync(this._scanPath(), 'utf8'));
+      if (j && typeof j === 'object' && j.days && typeof j.days === 'object') return { v: 1, days: j.days };
+    } catch (_) { /* 没有/损坏就当空 */ }
+    return { v: 1, days: {} };
+  }
+
+  saveScan(data) {
+    try {
+      fs.mkdirSync(this.dir, { recursive: true });
+      fs.writeFileSync(this._scanPath(), JSON.stringify(data), 'utf8');
+    } catch (_) { /* 写失败不影响行走 */ }
+  }
+
+  /**
+   * 认领一片搜索网格：返回其中「今天还没搜过」的键，并把它们标记为已搜。
+   * 客户端的沿路扫描/位置扫描都先来这里过滤 ——
+   * 同一天重走同一条路、来回走、多设备同步后再走，都不会重复消耗高德额度。
+   * @param {string} date
+   * @param {string[]} keys
+   * @returns {{fresh:string[], known:number, todayTotal:number}}
+   */
+  claimScan(date, keys) {
+    const d = /^\d{4}-\d{2}-\d{2}$/.test(String(date || '')) ? String(date) : new Date().toISOString().slice(0, 10);
+    const list = Array.isArray(keys) ? keys.map((k) => String(k || '').trim()).filter(Boolean).slice(0, 200) : [];
+    const data = this.loadScan();
+    const cur = data.days[d] || (data.days[d] = []);
+    const known = new Set(cur);
+    const fresh = [];
+    for (const k of list) {
+      if (known.has(k)) continue;
+      fresh.push(k);
+      known.add(k);
+    }
+    if (fresh.length) {
+      data.days[d] = Array.from(known).slice(0, 4000);   // 单日上限，防文件膨胀
+      // 只保留最近 14 天
+      const dates = Object.keys(data.days).sort();
+      for (const old of dates.slice(0, Math.max(0, dates.length - 14))) delete data.days[old];
+      this.saveScan(data);
+    }
+    return { fresh, known: list.length - fresh.length, todayTotal: (data.days[d] || []).length };
+  }
+
+  /** 今天已搜索的网格数（设置/收集册里展示，方便盯额度） */
+  scanCount(date) {
+    const d = /^\d{4}-\d{2}-\d{2}$/.test(String(date || '')) ? String(date) : new Date().toISOString().slice(0, 10);
+    const data = this.loadScan();
+    return ((data.days && data.days[d]) || []).length;
   }
 
   /**
