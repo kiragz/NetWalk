@@ -113,6 +113,7 @@ let SESSIONS_STUB = { ok: true, starts: [], resume: null };   // /api/sessions �
 const SESSION_POSTS = [];  // 记录 session 相关 POST（回滚 / 单删 / 取消指定）
 let ARCHIVES_STUB = [];    // /api/mailbox/archives 候选存档桩
 const PULL_BODIES = [];    // 记录 /api/mailbox/pull 的请求体（校验选了哪一封）
+let D_FRESH = false;       // /api/session/use-origin 桩：记录"下次从设定出发点出发"状态
 let LASTPOS_AT = Date.now();   // /api/lastpos 返回的最新点时间戳（校验"指定继续点是否过期"）
 win.fetch = function (url, opt) {
   const u = String(url);
@@ -168,6 +169,11 @@ win.fetch = function (url, opt) {
     SESSION_POSTS.push({ path: 'delete', body });
     SESSIONS_STUB = { ok: true, resume: SESSIONS_STUB.resume, starts: (SESSIONS_STUB.starts || []).filter((x) => Number(x.n) !== Number(body.n)) };
     return json({ ok: true, removed: 2, days: 1, sessions: 2, starts: SESSIONS_STUB.starts });
+  }
+  if (u.indexOf('/api/session/use-origin') === 0) {
+    try { SESSION_POSTS.push({ path: 'use-origin', body: JSON.parse(opt.body || '{}') }); } catch (_) {}
+    D_FRESH = true;
+    return json({ ok: true, freshStart: true, originName: '广东省广州市天河区天河软件园华景园区', origin: { lat: 23.135343, lng: 113.356426 } });
   }
   if (u.indexOf('/api/session/resume') === 0) {
     let body = {};
@@ -927,7 +933,9 @@ const shown = (id) => $(id).classList.contains('show');
   console.log('\n== R. 收集册按路实时采集 ==');
   const D = win.NetWalkDebug;
   D.stopPlaceCollector();     // 关掉前面遗留的采集定时器，避免它的上报混进计数
-  try { if (D.state.engine && typeof D.state.engine.stop === 'function') D.state.engine.stop(); } catch (_) { /* 停掉遗留引擎 */ }
+  // 停掉前面小节遗留的漫游引擎（否则它的 onUpdate 会带着别的路名触发采集）
+  try { if (D.state.lastEngineRef && typeof D.state.lastEngineRef.stop === 'function') D.state.lastEngineRef.stop(); } catch (_) {}
+  try { if (D.state.engine && typeof D.state.engine.stop === 'function') D.state.engine.stop(); } catch (_) {}
   D.state.provider = ap;                       // 换成高德 mock provider
   ap.placeSearch.searchNearBy = (k, c, r, cb) => cb('complete', {
     poiList: {
@@ -945,7 +953,8 @@ const shown = (id) => $(id).classList.contains('show');
   PLACES_POSTS.length = 0;
   await D.collectPlacesNow(true);
   await sleep(80);
-  const sent = PLACES_POSTS[PLACES_POSTS.length - 1];
+  const byRoad = (rd) => PLACES_POSTS.filter((x) => x && x.places && x.places.every((p) => p.road === rd));
+  const sent = byRoad('东站路').slice(-1)[0] || null;
   ok('采集会上报服务端', PLACES_POSTS.length >= 1, 'n=' + PLACES_POSTS.length);
   ok('上报地点带所在路名', !!sent && sent.places.length > 0 && sent.places.every((p) => p.road === '东站路'),
     sent ? JSON.stringify(sent.places.map((p) => p.road)) : '无');
@@ -960,7 +969,7 @@ const shown = (id) => $(id).classList.contains('show');
   D.state.lastCollectAt = 0;
   await D.collectPlacesNow(true);
   await sleep(80);
-  const sent2 = PLACES_POSTS[PLACES_POSTS.length - 1];
+  const sent2 = byRoad('林和中路').slice(-1)[0] || null;
   ok('换到新路后采集归属新路名', !!sent2 && sent2.places.every((p) => p.road === '林和中路'),
     sent2 ? JSON.stringify(sent2.places.map((p) => p.road)) : '无');
   D.state.started = false;
@@ -1137,6 +1146,7 @@ const shown = (id) => $(id).classList.contains('show');
   console.log('\n== W. 沿路搜索目标地点 ==');
   const D2 = win.NetWalkDebug;
   D2.stopPlaceCollector();          // 关掉前面小节遗留的采集定时器，避免干扰计数
+  try { if (D2.state.lastEngineRef && typeof D2.state.lastEngineRef.stop === 'function') D2.state.lastEngineRef.stop(); } catch (_) {}
   const searched = [];
   const NAMED_CATS = ['医院', '中学', '小学', '大学', '图书馆', '博物馆', '政府机关', '车站', '体育场馆', '地标景点'];
   ap._ready = true;
@@ -1211,6 +1221,38 @@ const shown = (id) => $(id).classList.contains('show');
   ok('指定继续点比最新数据新时按指定执行', !!posFresh && Math.abs(posFresh.lat - 23.2) < 1e-6 && posFresh.fromSession === 31,
     JSON.stringify(posFresh));
   D3.state.cfg.resumePoint = null;
+
+  // Y：下次从「设定出发点」出发（重置数据/换出发点后必须能从头开始）
+  console.log('\n== Y. 下次从设定出发点出发 ==');
+  const D4 = win.NetWalkDebug;
+  D4.state.cfg = D4.state.cfg || {};
+  D4.state.cfg.originName = '广东省广州市天河区天河软件园华景园区';
+  // ① 打开开关后，出发位置必须是"设定出发点"（忽略最新数据）
+  D4.state.cfg.freshStart = true;
+  D4.state.cfg.resumePoint = { n: 30, date: TODAY, lat: 23.0001, lng: 113.0001, t: Date.now() + 60000 };
+  SESSION_POSTS.length = 0;
+  const posFresh2 = await D4.findLastPosition();
+  ok('打开开关后忽略存档里的旧位置（返回 null → 用设定出发点）', posFresh2 === null, JSON.stringify(posFresh2));
+  ok('日志说明本次从设定出发点出发', $('logList').textContent.indexOf('本次从设定出发点出发') >= 0);
+  D4.state.cfg.freshStart = false;
+  // ② 出发记录面板里的按钮 + 状态显示
+  SESSION_POSTS.length = 0;
+  $('btnSessions').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(250);
+  ok('未设置时给出提示', $('sessionsResume').textContent.indexOf('设定出发点') >= 0, $('sessionsResume').textContent);
+  $('btnSessionsUseOrigin').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(250);
+  ok('点按钮调用 /api/session/use-origin', SESSION_POSTS.some((x) => x.path === 'use-origin' && x.body.on === true),
+    JSON.stringify(SESSION_POSTS.map((x) => x.path)));
+  ok('本地状态立刻生效', D4.state.cfg.freshStart === true);
+  ok('面板显示「下次从设定出发点开始」', $('sessionsResume').textContent.indexOf('设定出发点开始') >= 0, $('sessionsResume').textContent);
+  ok('日志写明出发地点名', $('logList').textContent.indexOf('天河软件园华景园区') >= 0);
+  // ③ 设置面板里的入口与状态
+  $('btnSettings').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(150);
+  ok('设置里显示「已设置」状态', $('freshStartHint').textContent.indexOf('已设置') >= 0, $('freshStartHint').textContent);
+  $('btnSettingsClose') && $('btnSettingsClose').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  D4.state.cfg.freshStart = false;
 
   console.log('\n===== UI 测试结果：' + pass + ' 通过 / ' + fail + ' 失败 =====');
   if (errors.length) { console.log('\n捕获到的错误：'); errors.slice(0, 10).forEach((e) => console.log('  - ' + e)); }

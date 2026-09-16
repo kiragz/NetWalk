@@ -99,6 +99,8 @@ const DEFAULT_CONFIG = {
   originName: '',
   // 本机名称：存档邮件主题/正文里用它区分是哪台设备（留空则用主机名）
   machineName: '',
+  // 下次出发强制从「设定出发点」开始（重置数据后自动置 true；出发一次后自动清掉）
+  freshStart: false,
   // 高德每日调用软上限（路径规划 + 逆地理）。个人认证开发者日配额 5000，
   // 留出余量，超限后引擎自动退化为直线推进，不影响玩法
   amapMaxCallsPerDay: 4000,
@@ -341,6 +343,10 @@ app.post('/api/config', (req, res) => {
     // 本机名称：只用于在存档邮件里区分是哪台设备（不随存档同步到别的机器）
     config.machineName = body.machineName.trim().slice(0, 24);
   }
+  if (body.freshStart !== undefined) {
+    config.freshStart = Boolean(body.freshStart);
+    if (config.freshStart) config.resumePoint = null;   // 与"指定继续点"互斥
+  }
   if (body.provider === 'amap' || body.provider === 'drill') config.provider = body.provider;
   if (['city', 'china', 'world'].includes(body.scope)) config.scope = body.scope;
   if (typeof body.city === 'string' && body.city.trim()) config.city = body.city.trim();
@@ -534,6 +540,9 @@ app.post('/api/account/reset', (req, res) => {
     }
     achStore.forgetAll();   // 内存里的解锁记录也要清，否则 shutdown/save 会写回
     placeStore.clearAll();  // 地点收集册一并清空（与轨迹同步重置）
+    config.freshStart = true;   // 下次出发从「设定出发点」开始
+    config.resumePoint = null;
+    saveConfig(config);
     removed++;
     // 出发点【保持不变】：重置的是"走过的数据"，不是"从哪里出发"。
     // 以前这里会把 origin 打回 DEFAULT（深圳城市中心），用户重置完就从深圳重新开始，
@@ -741,12 +750,19 @@ app.post('/api/session/start', (req, res) => {  const body = req.body || {};
   // 「指定的继续点」是一次性的：这次已经从那里出发了，立刻清掉。
   // 否则它会永久生效 —— 之后你走了新路，下次出发仍被拉回那个旧点
   // （就是「读了存档却没从上次结束点继续」的真凶）。
+  let cleared = [];
   if (config.resumePoint) {
     logLine(`session start consumed resumePoint #${config.resumePoint.n || '?'} @${config.resumePoint.lat},${config.resumePoint.lng}`);
     config.resumePoint = null;
-    saveConfig(config);
+    cleared.push('resumePoint');
   }
-  res.json({ ok: true, sessionNo: n });
+  if (config.freshStart) {
+    logLine('session start consumed freshStart（本次已从设定出发点出发）');
+    config.freshStart = false;
+    cleared.push('freshStart');
+  }
+  if (cleared.length) saveConfig(config);
+  res.json({ ok: true, sessionNo: n, cleared });
 });
 
 /** 全部出发点（跨天），主地图/轨迹回看画紫点用 */
@@ -813,15 +829,30 @@ app.post('/api/session/resume', (req, res) => {
   const n = Number((req.body && req.body.n) || 0);
   if (!n) {
     config.resumePoint = null;
+    config.freshStart = false;      // 同时取消"从设定出发点出发"
     saveConfig(config);
     return res.json({ ok: true, cleared: true });
   }
   const s = store.allSessionStarts().find((x) => Number(x.n) === n);
   if (!s) return res.status(400).json({ ok: false, error: `没有第 ${n} 次出发的记录` });
   config.resumePoint = { n, date: s.date, lat: s.lat, lng: s.lng, t: s.t };
+  config.freshStart = false;
   saveConfig(config);
   logLine(`session resume: set to #${n} (${s.lat},${s.lng})`);
   res.json({ ok: true, resume: config.resumePoint });
+});
+
+/**
+ * 下次出发是否强制从「设定出发点」开始（重置数据后自动打开）。
+ * 解决「重置了数据、又设了出发点，但出发时还是从存档里的旧位置继续」。
+ */
+app.post('/api/session/use-origin', (req, res) => {
+  const on = (req.body && req.body.on !== undefined) ? Boolean(req.body.on) : true;
+  config.freshStart = on;
+  if (on) config.resumePoint = null;   // 两个"起点指定"互斥
+  saveConfig(config);
+  logLine(`freshStart = ${on}（下次出发${on ? '从设定出发点' : '从最新位置'}开始）`);
+  res.json({ ok: true, freshStart: config.freshStart, originName: config.originName || '', origin: config.origin || null });
 });
 
 /**
@@ -987,6 +1018,10 @@ app.post('/api/profile/reset', (req, res) => {
     }
   } catch (err) { logLine('profile reset 清轨迹失败：' + (err && err.message ? err.message : err)); }
   try { placeStore.clearAll(); } catch (_) { /* 收集册一并清空 */ }
+  // 重置后下次出发必须从「设定出发点」开始 —— 否则会按"最新位置续走"跑到别处
+  config.freshStart = true;
+  config.resumePoint = null;
+  saveConfig(config);
   const p = profileMod.resetAll({
     name: (profileMod.load() || {}).name,
     city: String(b.city || ''),

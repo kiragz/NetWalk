@@ -44,6 +44,7 @@
     maskOverview: $('maskOverview'),
     ovSummary: $('ovSummary'), ovSvg: $('ovSvg'),
     cfgKey: $('cfgKey'), cfgSec: $('cfgSec'), cfgCity: $('cfgCity'), cfgScope: $('cfgScope'), cfgMachineName: $('cfgMachineName'),
+    btnFreshStart: $('btnFreshStart'), freshStartHint: $('freshStartHint'),
     keyNotice: $('keyNotice'),
     btnSaveCfg: $('btnSaveCfg'), btnCloseCfg: $('btnCloseCfg'),
     // 老板键
@@ -103,7 +104,7 @@
     albumAddName: $('albumAddName'), albumAddCat: $('albumAddCat'), btnAlbumAdd: $('btnAlbumAdd'), btnAlbumBackfill: $('btnAlbumBackfill'),
     albumNav: $('albumNav'), albumPrev: $('albumPrev'), albumNext: $('albumNext'), albumDate: $('albumDate'),
     btnSessions: $('btnSessions'), maskSessions: $('maskSessions'), sessionsBody: $('sessionsBody'), sessionsResume: $('sessionsResume'),
-    btnSessionsClose: $('btnSessionsClose'), btnSessionsResumeClear: $('btnSessionsResumeClear'),
+    btnSessionsClose: $('btnSessionsClose'), btnSessionsResumeClear: $('btnSessionsResumeClear'), btnSessionsUseOrigin: $('btnSessionsUseOrigin'),
     maskPickArc: $('maskPickArc'), pickArcBody: $('pickArcBody'), btnPickArcGo: $('btnPickArcGo'), btnPickArcCancel: $('btnPickArcCancel'),
     maskSyncFirst: $('maskSyncFirst'), btnSyncFirstGo: $('btnSyncFirstGo'), btnSyncFirstSkip: $('btnSyncFirstSkip'), syncFirstHint: $('syncFirstHint'),
     btnRepairArea: $('btnRepairArea'), btnRepairGo: $('btnRepairGo'), btnRepairCancel: $('btnRepairCancel'),
@@ -977,8 +978,13 @@
       // 失败静默：本地数据照常使用，具体原因在日志里（未配置 IMAP / 收件箱无存档邮件）
     } catch (_) { /* 离线时忽略 */ }
   }
-  /** 找"下次出发的位置"：① 手动指定的出发点优先 ② 否则最近一次走过的位置（跨天续走） */
+  /** 找"下次出发的位置"：⓪ 强制用设定出发点 ① 手动指定的出发点 ② 最近一次走过的位置（跨天续走） */
   async function findLastPosition() {
+    // ⓪ 重置过数据 / 用户点了「从设定出发点出发」→ 明确用设定出发点（不受已有数据与存档影响）
+    if (state.cfg && state.cfg.freshStart) {
+      log(`📍 本次从设定出发点出发（${state.cfg.originName || '设定出发点'}）`);
+      return null;
+    }
     let lp = null;
     try {
       const j = await fetch('/api/lastpos').then((r) => r.json()).catch(() => null);
@@ -1066,9 +1072,13 @@
     if (resume) {
       const when = resume.date === today() ? '上次结束位置' : `${resume.date} 的结束位置`;
       log(`从${when}继续（${resume.lat.toFixed(4)}, ${resume.lng.toFixed(4)}）——出发点只在注册时设定一次`);
+    } else if (state.cfg && state.cfg.freshStart) {
+      log(`从设定出发点出发（${state.cfg.originName || ''} ${Number(origin.lat).toFixed(4)}, ${Number(origin.lng).toFixed(4)}）`);
     } else {
       log('从出发点出发');
     }
+    // 标记已经用掉（服务端在 session/start 时也会清）
+    if (state.cfg) state.cfg.freshStart = false;
     // 先拿本次出发的全局序号（轨迹点要带上它，绘制时按会话切分、杜绝跨设备飞线），再启动引擎
     let sessionNo = 0;
     try {
@@ -1085,6 +1095,7 @@
       log(`第 ${sessionNo} 次出发（地图上已用紫点标出）`);
     }
     state.engine = engine;
+    state.lastEngineRef = engine;   // 留存最近一次引擎引用：换掉 state.engine 后也能停掉它（测试/排障用）
     engine.sessionNo = sessionNo;
     engine.start();
     state.started = true;
@@ -1915,10 +1926,16 @@
     const list = ((sessionsCache && sessionsCache.starts) || []).slice();
     const resume = sessionsCache && sessionsCache.resume;
     const curN = resume ? Number(resume.n) : 0;
+    const fresh = Boolean(state.cfg && state.cfg.freshStart);
+    const originName = (state.cfg && state.cfg.originName) || '设定出发点';
     if (el.sessionsResume) {
-      el.sessionsResume.textContent = resume && Number.isFinite(Number(resume.lat))
-        ? `📍 下次将从第 ${curN} 次出发的位置继续（${resume.date || ''} ${Number(resume.lat).toFixed(4)}, ${Number(resume.lng).toFixed(4)}）`
-        : '下次从最新位置继续（未指定）。';
+      if (fresh) {
+        el.sessionsResume.textContent = `📍 下次将从「${originName}」这个设定出发点开始（忽略已有数据与存档）`;
+      } else if (resume && Number.isFinite(Number(resume.lat))) {
+        el.sessionsResume.textContent = `📍 下次将从第 ${curN} 次出发的位置继续（${resume.date || ''} ${Number(resume.lat).toFixed(4)}, ${Number(resume.lng).toFixed(4)}）`;
+      } else {
+        el.sessionsResume.textContent = '下次从最新位置继续（未指定）。想让下次从设定出发点出发，点下面的「📍 下次从设定出发点出发」。';
+      }
     }
     if (!el.sessionsBody) return;
     if (!list.length) { el.sessionsBody.innerHTML = '<div class="hint">还没有出发记录</div>'; return; }
@@ -1973,11 +1990,39 @@
     try {
       const r = await postJson('/api/session/resume', { n: 0 }, 8000);
       if (r && r.ok) {
-        if (state.cfg) state.cfg.resumePoint = null;
+        if (state.cfg) { state.cfg.resumePoint = null; state.cfg.freshStart = false; }
         log('↺ 已恢复默认：下次从最新位置继续。');
         await openSessions();
       }
     } catch (e) { log('取消失败：' + (e && e.message ? e.message : e)); }
+  }
+
+  /** 设置里显示「下次是否从设定出发点出发」的状态 */
+  function renderFreshStartHint() {
+    if (!el.freshStartHint) return;
+    if (state.cfg && state.cfg.freshStart) {
+      el.freshStartHint.textContent = '✅ 已设置：下次出发就从这里的出发点开始（出发一次后自动失效）';
+      el.freshStartHint.style.color = 'var(--ok, #3ddc97)';
+    } else {
+      el.freshStartHint.textContent = '当前：下次从「最新位置 / 指定出发点」继续（跨天续走）。想从头开始点左边的按钮。';
+      el.freshStartHint.style.color = '';
+    }
+  }
+
+  /** 下次出发从「设定出发点」开始（重置数据后自动打开；忽略已有数据与存档位置） */
+  async function useOriginNextTime() {
+    try {
+      const r = await postJson('/api/session/use-origin', { on: true }, 8000);
+      if (r && r.ok) {
+        if (state.cfg) {
+          state.cfg.freshStart = true;
+          state.cfg.resumePoint = null;
+        }
+        log(`📍 已设置：下次出发从设定出发点出发（${r.originName || '设定出发点'}）${r.origin ? `（${Number(r.origin.lat).toFixed(4)}, ${Number(r.origin.lng).toFixed(4)}）` : ''}。出发一次后自动失效。`);
+        renderFreshStartHint();
+        await openSessions();
+      }
+    } catch (e) { log('设置失败：' + (e && e.message ? e.message : e)); }
   }
 
   function setMapFollowing(on) {
@@ -2657,6 +2702,7 @@
   // ---------- 出发点 ----------
   /** 把「当前生效的出发点」渲染到设置弹窗（pending 优先于已保存配置） */
   function renderOriginFields() {
+    renderFreshStartHint();                    // 显示「下次是否从设定出发点出发」
     const cfg = state.cfg || {};
     const city = el.cfgCity.value || cfg.city || '深圳';
     const center = cityCenterOf(city);
@@ -2869,6 +2915,12 @@
     if (el.btnSessionsClose) el.btnSessionsClose.addEventListener('click', () => { if (el.maskSessions) el.maskSessions.classList.remove('show'); });
     if (el.maskSessions) el.maskSessions.addEventListener('click', (e) => { if (e.target === el.maskSessions) el.maskSessions.classList.remove('show'); });
     if (el.btnSessionsResumeClear) el.btnSessionsResumeClear.addEventListener('click', () => { clearResumePoint().catch(() => {}); });
+    if (el.btnSessionsUseOrigin) el.btnSessionsUseOrigin.addEventListener('click', () => { useOriginNextTime().catch(() => {}); });
+    // 设置 → 出发点：让下次从这里的出发点开始（重置后自动打开，所以这里要显示状态）
+    if (el.btnFreshStart) el.btnFreshStart.addEventListener('click', async () => {
+      await useOriginNextTime();
+      renderFreshStartHint();
+    });
     if (el.sessionsBody) el.sessionsBody.addEventListener('click', (e) => {
       const res = e.target.closest && e.target.closest('[data-resume]');
       if (res) { doRollbackTo(Number(res.dataset.resume)).catch(() => {}); return; }
