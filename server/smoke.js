@@ -373,6 +373,36 @@ p.planRoute(from, { lat: far.lat, lng: far.lng }).then(async (route) => {
   const codeMail = '你的 NetWalk 登录验证码是：123456';
   ok('验证码邮件不会被误认成存档', mailbox.extractCode(codeMail) === null);
 
+  console.log('\n== N2. 存档邮件主题解析与候选排序（同步要选对存档） ==');
+  const subjNew = '=?UTF-8?B?' + Buffer.from('NetWalk 存档 2026-09-16 17:23 · 客厅电脑', 'utf8').toString('base64') + '?=';
+  const pNew = mailbox.parseArchiveSubject(subjNew);
+  ok(pNew.dataAt === new Date(2026, 8, 16, 17, 23, 0, 0).getTime(), '能解析新格式主题的数据时间', new Date(pNew.dataAt).toISOString());
+  ok(pNew.machine === '客厅电脑', '能解析机器名（MIME 编码中文）', pNew.machine);
+  ok(pNew.label.indexOf('2026-09-16 17:23') === 0 && pNew.label.indexOf('客厅电脑') > 0, 'label 同时含时间与机器名', pNew.label);
+  const pOld = mailbox.parseArchiveSubject('NetWalk 存档码（2026-09-15）');
+  ok(pOld.legacy === true && pOld.machine === '' && pOld.dataAt === 0, '旧格式主题的数据时间视为未知（→ 会去读正文）', pOld.label);
+  const pQ = mailbox.parseArchiveSubject('=?utf-8?Q?NetWalk_=E5=AD=98=E6=A1=A3_2026-09-16_08:05_=C2=B7_=E5=8A=9E=E5=85=AC=E5=AE=A4=E7=94=B5=E8=84=91?=');
+  ok(pQ.machine === '办公室电脑', '能解码 Q 编码主题里的机器名', pQ.machine);
+  const ranked = mailbox.rankArchiveCandidates([
+    { mailId: 11, label: '数据旧但打包晚', dataAt: new Date(2026, 8, 16, 18, 44).getTime(), dataEndAt: new Date(2026, 8, 16, 12, 0).getTime(), mailDate: 1789000000000 },
+    { mailId: 10, label: '数据新但打包早', dataAt: new Date(2026, 8, 16, 17, 23).getTime(), dataEndAt: new Date(2026, 8, 16, 17, 20).getTime(), mailDate: 1788000000000 },
+    { mailId: 9, label: '旧版无时间', dataAt: 0, dataEndAt: 0, mailDate: 1787000000000 },
+  ]);
+  ok(ranked[0].mailId === 10, '排序优先「数据实际覆盖到的最新时刻」而不是打包/邮件时间', ranked.map((x) => x.mailId).join(','));
+  ok(ranked[2].mailId === 9, '无数据时间的排最后', ranked.map((x) => x.mailId).join(','));
+  // 数据覆盖时刻缺失时退到打包时间
+  const ranked2 = mailbox.rankArchiveCandidates([
+    { mailId: 21, dataAt: new Date(2026, 8, 16, 12, 0).getTime(), mailDate: 1 },
+    { mailId: 22, dataAt: new Date(2026, 8, 16, 18, 0).getTime(), mailDate: 2 },
+  ]);
+  ok(ranked2[0].mailId === 22, '没有数据覆盖时刻时按打包时间排', ranked2.map((x) => x.mailId).join(','));
+  const hdrText = 'Subject: ' + subjNew + '\r\nDate: Wed, 16 Sep 2026 17:25:00 +0800\r\n\r\n';
+  const hdr = mailbox.parseHeaderFetch('* 12 FETCH (BODY[HEADER.FIELDS (SUBJECT DATE)] {' + Buffer.byteLength(hdrText) + '}\r\n' + hdrText + ')');
+  const hp = mailbox.parseArchiveSubject(hdr.subject);
+  ok(hp.machine === '客厅电脑' && hp.dataAt > 0 && hdr.mailDate > 0,
+    '能从 header FETCH 响应解析主题（解码后）与邮件时间',
+    hp.label + ' / ' + hdr.mailDate);
+
   console.log(`\n===== 结果：${pass} 通过 / ${fail} 失败 =====\n`);
   process.exit(fail ? 1 : 0);
 });

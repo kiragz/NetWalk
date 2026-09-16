@@ -61,6 +61,9 @@ function exportArchive(store, achStore, machineCfg, placeStore) {
   // 可选：把本机配置（地图 Key / 邮箱）一起带走。旧版本读这个字段会忽略，向后兼容。
   const cfg = pickCarryConfig(machineCfg);
   if (Object.keys(cfg).length) payload.cfg = cfg;
+  // 来源机器名：只作信息展示（导入时不会覆盖本机的名称）
+  const mn = String((machineCfg && machineCfg.machineName) || '').trim();
+  if (mn) payload.machine = mn.slice(0, 24);
   const json = JSON.stringify(payload);
   const buf = zlib.deflateRawSync(Buffer.from(json, 'utf8'), { level: 9 });
   const code = `${PREFIX}.${buf.toString('base64url')}`;

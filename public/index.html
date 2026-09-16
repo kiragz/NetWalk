@@ -28,7 +28,7 @@
   <header class="topbar" data-page-node-id="ddrJhtR5e5RhxcM4HEN3M4">
     <div class="brand" data-page-node-id="8DH2ofHV66qbHEOc2uAOXh">Net<span data-page-node-id="Gt7m3YCBqixEngqyYKio6f">Walk</span></div>
     <button class="ver-pill" id="btnAccount" title="账号与档案">👤 未登录</button>
-    <button class="ver-pill" id="btnVersion" title="查看版本更新概要">v0.9.41</button>
+    <button class="ver-pill" id="btnVersion" title="查看版本更新概要">v0.9.42</button>
     <div class="pill" id="pillMap" data-page-node-id="GjTS25Bi1mrlBafIXfCBl3">地图加载中</div>
     <div class="pill" id="pillNet" data-page-node-id="Snjd11zKSBJFXSszeLhDMN">网络采集中</div>
     <div class="pill" id="pillKey" data-page-node-id="h2AOMKNxwH67HjkAsxSCgU">击键采集中</div>
@@ -146,6 +146,12 @@
         <span class="hint" id="secHint" style="flex:1;margin:0"></span>
       </div>
       <div class="hint" data-page-node-id="QqemceEIWlMuiYKc2eXhgK">在高德控制台与 Key <b>一起生成、但值不同</b>（不要填成 Key 本身，否则地址解析会一直超时）。留空保持不变；<b>地址解析超时</b>时可点上面「清除安全密钥」试一次——若你的 Key 没开「静态安全密钥」，填了反而会被拒。</div>
+    </div>
+
+    <div class="field">
+      <label>本机名称（存档邮件里用来区分是哪台电脑） <span class="tag-opt">可选</span></label>
+      <input type="text" id="cfgMachineName" placeholder="留空则用电脑主机名" autocomplete="off"/>
+      <div class="hint">发到邮箱的存档主题会写成「NetWalk 存档 2026-09-16 17:23 · 客厅电脑」。同步时列出来一眼就能看出该用哪台机器、哪个时刻的数据。<b>本机名称不会随存档同步到别的电脑</b>。</div>
     </div>
 
     <div class="notice warn" data-page-node-id="XgR2CwqSbKXtipLQePqzA5">
@@ -425,6 +431,23 @@
       <button class="btn" id="btnAlbum" title="查看路过收集的医院/学校/地标等正式地点">📔 地点收集册</button>
       <button class="btn" id="btnSessions" title="出发记录：指定从某次出发继续，或回滚删掉之后几次出发的轨迹">⏮ 出发记录</button>
       <button class="btn primary" id="btnStatsClose" data-page-node-id="4VLyMIuq83vyRCqfbLb16P">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- 选择要用哪份邮箱存档 -->
+<div class="modal-mask" id="maskPickArc">
+  <div class="modal">
+    <h2>📥 选择要用哪份存档</h2>
+    <div class="desc">
+      邮箱里有多份存档（每台设备、每次自动存档都会发一份）。
+      <b>默认选中「数据打包时间最新」的一份</b> —— 用它才能从最新的结束点继续。
+      邮件到达顺序不等于数据新旧，所以才需要你确认一下。
+    </div>
+    <div id="pickArcBody" style="max-height:46vh;overflow:auto"></div>
+    <div class="modal-acts">
+      <button class="btn primary" id="btnPickArcGo">用选中的这份同步</button>
+      <button class="btn" id="btnPickArcCancel">取消</button>
     </div>
   </div>
 </div>

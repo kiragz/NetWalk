@@ -43,7 +43,7 @@
     maskSettings: $('maskSettings'), maskDone: $('maskDone'),
     maskOverview: $('maskOverview'),
     ovSummary: $('ovSummary'), ovSvg: $('ovSvg'),
-    cfgKey: $('cfgKey'), cfgSec: $('cfgSec'), cfgCity: $('cfgCity'), cfgScope: $('cfgScope'),
+    cfgKey: $('cfgKey'), cfgSec: $('cfgSec'), cfgCity: $('cfgCity'), cfgScope: $('cfgScope'), cfgMachineName: $('cfgMachineName'),
     keyNotice: $('keyNotice'),
     btnSaveCfg: $('btnSaveCfg'), btnCloseCfg: $('btnCloseCfg'),
     // 老板键
@@ -104,6 +104,7 @@
     albumNav: $('albumNav'), albumPrev: $('albumPrev'), albumNext: $('albumNext'), albumDate: $('albumDate'),
     btnSessions: $('btnSessions'), maskSessions: $('maskSessions'), sessionsBody: $('sessionsBody'), sessionsResume: $('sessionsResume'),
     btnSessionsClose: $('btnSessionsClose'), btnSessionsResumeClear: $('btnSessionsResumeClear'),
+    maskPickArc: $('maskPickArc'), pickArcBody: $('pickArcBody'), btnPickArcGo: $('btnPickArcGo'), btnPickArcCancel: $('btnPickArcCancel'),
     maskSyncFirst: $('maskSyncFirst'), btnSyncFirstGo: $('btnSyncFirstGo'), btnSyncFirstSkip: $('btnSyncFirstSkip'), syncFirstHint: $('syncFirstHint'),
     btnRepairArea: $('btnRepairArea'), btnRepairGo: $('btnRepairGo'), btnRepairCancel: $('btnRepairCancel'),
     repairInfo: $('repairInfo'), repairBar: $('repairBar'), pickBox: $('pickBox'), netBanner: $('netBanner'),
@@ -337,6 +338,12 @@
       el.cfgKey.placeholder = key ? '已配置（留空保持不变）' : '留空则使用演练模式（虚构路网）';
       el.cfgSec.value = '';
       el.cfgSec.placeholder = sec ? '已配置（留空保持不变）' : '启用静态安全密钥的 Key 必填（不是 Key 本身）';
+      // 本机名称也要回填（否则用户以为没保存、反复重填）
+      if (el.cfgMachineName) {
+        const mn = String((state.cfg && state.cfg.machineName) || '');
+        el.cfgMachineName.value = mn;
+        el.cfgMachineName.placeholder = mn ? mn : '留空则用电脑主机名';
+      }
     } catch (_) { /* noop */ }
   }
 
@@ -831,7 +838,57 @@
    * 登录后 / 「一键同步」按钮共用。返回摘要供 UI 展示。
    * skipData=true 时只恢复配置，不拉旧存档 —— 本机重置过、不想被旧轨迹污染时用。
    */
-  async function syncFromMailbox({ skipData = false } = {}) {
+  /**
+   * 列邮箱里的候选存档，必要时让用户选（默认选中「数据打包时间最新」的一份）。
+   * 邮件到达顺序 ≠ 数据新旧：另一台机器的每小时自动存档可能后到但数据更旧，
+   * 只用"最新一封"会漏掉真正最新的进度 —— 所以这里先列出来确认。
+   * @returns {Promise<{mailId:number, cancelled:boolean}>} mailId=0 表示交给服务端自动挑
+   */
+  let pickArcResolve = null;
+  function fmtArcStamp(ms) {
+    if (!Number(ms)) return '';
+    const d = new Date(Number(ms));
+    const p = (n) => String(n).padStart(2, '0');
+    return `${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+  function renderPickArc(list) {
+    if (!el.pickArcBody) return;
+    el.pickArcBody.innerHTML = list.map((a, i) => {
+      // 优先显示「数据实际覆盖到的最新时刻」——这才是"用哪份能接着走"的依据
+      const end = Number(a.dataEndAt) || 0;
+      const main = end ? `${fmtArcStamp(end)} 数据到` : (fmtArcStamp(a.dataAt) || '时间未知');
+      const bits = [];
+      if (a.days) bits.push(`${a.days} 天`);
+      if (a.points) bits.push(`${a.points} 个轨迹点`);
+      if (a.places) bits.push(`${a.places} 个地点`);
+      return `
+      <label style="display:flex;gap:8px;align-items:flex-start;padding:6px 0;border-bottom:1px solid rgba(127,127,127,.14);cursor:pointer">
+        <input type="radio" name="pickArc" value="${Number(a.mailId) || 0}"${i === 0 ? ' checked' : ''} style="margin-top:3px"/>
+        <span style="flex:1">
+          <b>${main}</b>${a.machine ? ' · ' + a.machine : (a.legacy ? ' · 旧版存档（无机器名）' : '')}
+          ${i === 0 ? '<span style="color:var(--accent,#7c6cf0);font-weight:700"> ← 数据最新，建议用这份</span>' : ''}
+          <br><span style="opacity:.65;font-size:12px">打包 ${fmtArcStamp(a.dataAt) || '未知'} · 邮件 ${fmtArcStamp(a.mailDate) || '时间未知'} · 第 ${a.mailId} 封${bits.length ? ' · ' + bits.join(' · ') : ''}</span>
+        </span>
+      </label>`;
+    }).join('');
+  }
+  async function askWhichArchive() {
+    let list = [];
+    try {
+      // withData=1：让服务端读正文解出「数据实际覆盖到的最新时刻」，选择才有依据
+      const r = await fetchJson('/api/mailbox/archives?limit=12&withData=1', 60000);
+      if (!r || !r.ok) return { mailId: 0, cancelled: false, error: (r && r.error) || '' };
+      list = r.list || [];
+      if (r.thisMachine) state.thisMachineName = r.thisMachine;
+    } catch (_) { return { mailId: 0, cancelled: false }; }
+    if (!list.length) return { mailId: 0, cancelled: false };
+    if (list.length === 1) return { mailId: Number(list[0].mailId) || 0, cancelled: false };
+    renderPickArc(list);
+    if (el.maskPickArc) el.maskPickArc.classList.add('show');
+    return new Promise((resolve) => { pickArcResolve = resolve; });
+  }
+
+  async function syncFromMailbox({ skipData = false, mailId = 0 } = {}) {
     const res = { ok: false, restored: '', pulled: '', keyRestored: false, days: 0, skipped: skipData };
     const rc = await fetch('/api/mailbox/restore-config', {
       method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
@@ -839,12 +896,15 @@
     if (rc && rc.ok) res.restored = '配置 ' + (rc.restored || []).length + ' 项';
     if (skipData) return res;
     const mp = await fetch('/api/mailbox/pull', {
-      method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+      method: 'POST', headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify(mailId ? { mailId: Number(mailId) } : {}),
     }).then((x) => x.json()).catch(() => null);
     if (mp && mp.ok) {
       res.ok = true;
       res.days = (mp.result && mp.result.days) || 0;
       res.pulled = '存档 ' + res.days + ' 天';
+      res.picked = mp.picked || null;
+      if (mp.picked && mp.picked.label) res.pulled += `（用 ${mp.picked.label}）`;
       if (mp.result && mp.result.resetTakeover) res.takeover = true;
       if (mp.keyRestored) res.keyRestored = true;
       // 收集册也跟着存档回来了（换电脑后不用重新采）
@@ -852,6 +912,12 @@
       if (pm && (pm.added || pm.merged)) {
         res.places = pm;
         res.pulled += '，收集册 +' + pm.added + ' 个地点';
+      }
+      // 说清楚用了哪一份存档（数据到什么时候、哪台机器），避免"同步了但没从那个点继续"的困惑
+      if (mp.picked) {
+        const t = Number(mp.picked.dataEndAt) || Number(mp.picked.dataAt) || 0;
+        res.pickedLabel = (t ? fmtArcStamp(t) + (mp.picked.dataEndAt ? ' 数据到' : ' 打包') : '时间未知')
+          + (mp.picked.machine ? ' · ' + mp.picked.machine : '');
       }
       // 明确告诉用户接下来会从哪里继续（跨设备同步后尤其重要，不然不知道有没有同步对）
       try {
@@ -894,7 +960,12 @@
         if (j.restoredKeys && j.restoredKeys.length) extras.push('配置 ' + j.restoredKeys.length + ' 项');
         const pm = imp.places;
         if (pm && (pm.added || pm.merged)) extras.push('收集册 ' + pm.added + ' 个新地点' + (pm.merged ? '（补齐 ' + pm.merged + ' 条路名/距离）' : ''));
+        const pickedTxt = j.picked ? (Number(j.picked.dataEndAt) || Number(j.picked.dataAt) || 0) : 0;
+        const pickedLabel = pickedTxt
+          ? fmtArcStamp(pickedTxt) + (j.picked.dataEndAt ? ' 数据到' : ' 打包') + (j.picked.machine ? ' · ' + j.picked.machine : '')
+          : '';
         log(`已从邮箱同步最新存档（${imp.total != null ? imp.total + ' 天' : '完成'}）`
+          + (pickedLabel ? `，用的是「${pickedLabel}」` : '')
           + (extras.length ? '，并恢复' + extras.join('、') : '')
           + '，将从上次结束点继续');
       }
@@ -2678,6 +2749,24 @@
       loadKeyForm();   // 回填 Key / 安全密钥，避免用户以为没保存
     });
     if (el.btnMapDismiss) el.btnMapDismiss.addEventListener('click', hideMapBanner);
+    // 选择要用哪份邮箱存档
+    if (el.btnPickArcGo) el.btnPickArcGo.addEventListener('click', () => {
+      const sel = el.pickArcBody ? el.pickArcBody.querySelector('input[name="pickArc"]:checked') : null;
+      const id = sel ? Number(sel.value) || 0 : 0;
+      if (el.maskPickArc) el.maskPickArc.classList.remove('show');
+      if (pickArcResolve) { const f = pickArcResolve; pickArcResolve = null; f({ mailId: id, cancelled: false }); }
+    });
+    if (el.btnPickArcCancel) el.btnPickArcCancel.addEventListener('click', () => {
+      if (el.maskPickArc) el.maskPickArc.classList.remove('show');
+      if (pickArcResolve) { const f = pickArcResolve; pickArcResolve = null; f({ mailId: 0, cancelled: true }); }
+    });
+    if (el.maskPickArc) el.maskPickArc.addEventListener('click', (e) => {
+      if (e.target === el.maskPickArc) {
+        el.maskPickArc.classList.remove('show');
+        if (pickArcResolve) { const f = pickArcResolve; pickArcResolve = null; f({ mailId: 0, cancelled: true }); }
+      }
+    });
+
     // 出发记录：指定继续点 / 回滚 / 单次删除
     if (el.btnSessions) el.btnSessions.addEventListener('click', () => { openSessions().catch(() => {}); });
     if (el.btnSessionsClose) el.btnSessionsClose.addEventListener('click', () => { if (el.maskSessions) el.maskSessions.classList.remove('show'); });
@@ -2832,11 +2921,19 @@
       // 本机更晚重置→对端重置前的点按时间戳全部过滤，旧轨迹不会回来）。
       try { localStorage.removeItem('netwalkNoAutoSync'); } catch (_) { /* noop */ }
       try {
-        const r = await syncFromMailbox();
+        // 先列邮箱里的候选存档让用户确认（多份存档时）——避免用错机器/用错时刻的数据
+        const pick = await askWhichArchive();
+        if (pick.cancelled) {
+          log('已取消同步（没有选择任何存档）。');
+          return;
+        }
+        const r = await syncFromMailbox({ mailId: pick.mailId });
         const parts = [];
         if (r.restored) parts.push(r.restored);
         if (r.ok) parts.push(r.pulled); else if (r.pulled) parts.push(r.pulled);
         log('🔄 一键同步：' + (parts.filter(Boolean).join('；') || '未完成'));
+        if (r.pickedLabel) log(`📥 用的是「${r.pickedLabel}」这份存档。`);
+        if (r.resume) log(`📍 下次出发将从 ${r.resume.date || ''} 的位置（${r.resume.lat.toFixed(4)}, ${r.resume.lng.toFixed(4)}）继续。`);
         if (!parts.filter(Boolean).length) log('同步未完成：请先在 ⚙ 设置 → 📮 配置邮件服务里填好 SMTP/IMAP 授权码');
         if (r.takeover) log('♻ 已执行对端的重置标记：本机旧轨迹已全部清空，采用同步来的全新数据。');
         if (r.keyRestored) {
@@ -3266,6 +3363,8 @@ el.btnReport.addEventListener('click', () => {
         originCustom: og.originCustom,
         originName: og.originName,
       };
+      // 本机名称：只用于存档邮件区分设备（留空 = 用主机名）
+      if (el.cfgMachineName) body.machineName = el.cfgMachineName.value.trim().slice(0, 24);
       // 只有确定有 Key 才下发 amapKey/provider：
       // 否则"输入框为空 + savedKey 还没回填完成"时会把 Key 清成空串、provider 打回 drill，
       // 表现为"重置/保存设置后地图变虚拟路网"。

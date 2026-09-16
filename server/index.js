@@ -16,6 +16,7 @@ const { AchievementStore } = require('./achievements');
 const { exportArchive, importArchive, decodeArchive, pickCarryConfig } = require('./archive');
 const mailbox = require('./mailbox');
 const { classifyAmapProbe } = require('./amapcheck');
+const { machineLabel: mailerMachineLabel } = require('./mailer');
 const { staticMiddleware } = require('./static');
 const { IS_PACKAGED, APP_ROOT, DATA_DIR, PUBLIC_DIR } = require('./paths');
 const { ensurePublic } = require('./webassets');
@@ -96,6 +97,8 @@ const DEFAULT_CONFIG = {
   // 出发点：originCustom=false 时用所选城市的市中心；true 时用 origin 里的坐标
   originCustom: false,
   originName: '',
+  // 本机名称：存档邮件主题/正文里用它区分是哪台设备（留空则用主机名）
+  machineName: '',
   // 高德每日调用软上限（路径规划 + 逆地理）。个人认证开发者日配额 5000，
   // 留出余量，超限后引擎自动退化为直线推进，不影响玩法
   amapMaxCallsPerDay: 4000,
@@ -333,6 +336,10 @@ app.post('/api/config', (req, res) => {
     // 会导致高德签名校验失败（表现为地图正常但"地址解析超时"）—— 这里直接忽略，保留原值。
     if (sec && sec === String(config.amapKey || '').trim()) sec = config.amapSecurityJsCode || '';
     config.amapSecurityJsCode = sec;
+  }
+  if (typeof body.machineName === 'string') {
+    // 本机名称：只用于在存档邮件里区分是哪台设备（不随存档同步到别的机器）
+    config.machineName = body.machineName.trim().slice(0, 24);
   }
   if (body.provider === 'amap' || body.provider === 'drill') config.provider = body.provider;
   if (['city', 'china', 'world'].includes(body.scope)) config.scope = body.scope;
@@ -1036,11 +1043,32 @@ app.get('/api/track/range', (req, res) => {
   res.json({ ok: true, from, to, days, resetAt, starts: store.allSessionStarts().filter((x) => x.date >= from && x.date <= to), total: days.reduce((n, x) => n + x.count, 0) });
 });
 
-// 从邮箱拉回最新存档码（出发前调用；配置了 IMAP 才可用）
+// 列出邮箱里的候选存档（带「数据到什么时候 + 机器名」，供用户选择用哪一份）
+// ?withData=1 时会读正文解出「数据实际覆盖到的最新时刻」（慢 2~3 秒，但选得准）
+app.get('/api/mailbox/archives', (req, res) => {
+  const limit = Math.max(1, Math.min(30, Number(req.query.limit) || 12));
+  const withData = String(req.query.withData || '') === '1';
+  mailbox.pickArchive(config, logLine, { listOnly: true, limit, withData }).then((r) => {
+    if (!r.ok) return res.json({ ok: false, error: r.error });
+    // 列表只回元信息：存档码正文太大，不能塞进来
+    const list = (r.list || []).map((x) => ({
+      mailId: x.mailId, subject: x.subject, mailDate: x.mailDate,
+      dataAt: x.dataAt, dataEndAt: x.dataEndAt || 0, machine: x.machine || '',
+      label: x.label, legacy: Boolean(x.legacy), days: x.days || 0,
+      points: x.points || 0, places: x.places || 0, hasCode: Boolean(x.code || x.hasCode),
+    }));
+    res.json({ ok: true, list, thisMachine: mailerMachineLabel(config), withData });
+  }).catch((e) => res.json({ ok: false, error: (e && e.message) || String(e) }));
+});
+
+// 从邮箱拉回存档码（出发前调用；配置了 IMAP 才可用）
 // 拿到后直接幂等导入（importArchive 按时间戳去重，重复导入不产生重复轨迹），
 // 保证「从上次结束点继续」跨设备成立；同时解析邮件里的配置区返回给前端（一键恢复 Key/SMTP）
+// body.mailId 可选：指定用哪一封（前端列出候选后由用户选择）；不传则自动用「数据打包时间最新」的一封
 app.post('/api/mailbox/pull', (req, res) => {
-  mailbox.fetchLatestArchiveCode(config, logLine).then((r) => {
+  const wantMailId = Number((req.body && req.body.mailId) || 0) || 0;
+  const pickOpts = wantMailId ? { mailId: wantMailId } : {};
+  mailbox.pickArchive(config, logLine, pickOpts).then((r) => {
     if (!r.ok) return res.json({ ok: false, error: r.error });
     // importArchive 失败会抛异常；能走到下一行就说明导入成功了。
     // （以前写成 Boolean(imp && imp.ok)，而 importArchive 不返回 ok 字段 → 成功也报失败）
@@ -1076,12 +1104,15 @@ app.post('/api/mailbox/pull', (req, res) => {
     }
     const agg = store.aggregate(rangeToBounds('all'));
     const st = achStore.refresh(agg);
-    logLine('mailbox pull ok: added=' + imp.added + ' merged=' + imp.merged + ' mailId=' + r.mailId);
+    logLine('mailbox pull ok: added=' + imp.added + ' merged=' + imp.merged + ' mailId=' + r.mailId
+      + ' picked=' + ((r.picked && r.picked.label) || ''));
     res.json({
       ok: true,
       result: { ...imp, days: store.listDates().length, achievements: st },
       cloudConfig,
       mailId: r.mailId,
+      picked: r.picked || null,
+      archives: (r.list || []).slice(0, 12),
       cfgAvailable: Boolean(imp.cfg),
       restoredKeys: restored,
       keyRestored: !hadKey && Boolean(config.amapKey),
@@ -1092,7 +1123,7 @@ app.post('/api/mailbox/pull', (req, res) => {
 
 // 从邮箱恢复机器配置（Key / 安全密钥 / SMTP / IMAP）：换设备登录后点一次即全部恢复
 app.post('/api/mailbox/restore-config', (req, res) => {
-  mailbox.fetchLatestArchiveCode(config, logLine).then((r) => {
+  mailbox.pickArchive(config, logLine, {}).then((r) => {
     if (!r.ok) return res.json({ ok: false, error: r.error });
     const cloud = parseMachineConfigText(r.mailText);
     if (!Object.keys(cloud).length) return res.json({ ok: false, error: '邮箱里这封存档邮件不含配置信息（可能是旧版本发出的）' });

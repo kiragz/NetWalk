@@ -111,6 +111,8 @@ const PLACES_POSTS = [];   // 记录 /api/places/add 的载荷（收集册实时
 let PLACES_DAYS = [];      // /api/places 返回的按天数据（收集册按天回顾测试用）
 let SESSIONS_STUB = { ok: true, starts: [], resume: null };   // /api/sessions 桩
 const SESSION_POSTS = [];  // 记录 session 相关 POST（回滚 / 单删 / 取消指定）
+let ARCHIVES_STUB = [];    // /api/mailbox/archives 候选存档桩
+const PULL_BODIES = [];    // 记录 /api/mailbox/pull 的请求体（校验选了哪一封）
 win.fetch = function (url, opt) {
   const u = String(url);
   calls.push((opt && opt.method ? opt.method : 'GET') + ' ' + u);
@@ -122,6 +124,13 @@ win.fetch = function (url, opt) {
   }
   if (u.indexOf('/api/day/') === 0) {
     return json({ date: TODAY, path: FAKE_TRACK, stats: { distance: 4845, duration: 1400000, avgSpeed: 5.2, maxSpeed: 12.3, rolls: 8 }, rolls: new Array(8).fill({}), visitedRoads: ['科技路0', '科技路1', '科技路2'] });
+  }
+  if (u.indexOf('/api/mailbox/archives') === 0) return json({ ok: true, thisMachine: '测试机', list: ARCHIVES_STUB });
+  if (u.indexOf('/api/mailbox/pull') === 0) {
+    try { PULL_BODIES.push(JSON.parse(opt.body || '{}')); } catch (_) { PULL_BODIES.push(null); }
+    const want = PULL_BODIES[PULL_BODIES.length - 1] || {};
+    const picked = ARCHIVES_STUB.find((a) => Number(a.mailId) === Number(want.mailId)) || ARCHIVES_STUB[0] || null;
+    return json({ ok: true, result: { added: 1, merged: 0, total: 1, days: 3, achievements: FAKE_AGG }, mailId: picked ? picked.mailId : 0, picked, cfgAvailable: false, restoredKeys: [], keyRestored: false, hasKey: false });
   }
   if (u.indexOf('/api/mailbox/status') === 0) return json(Object.assign({ ok: true }, MAILBOX_STATUS));
   if (u.indexOf('/api/track/range') === 0) return json({ ok: true, days: TRACK_RANGE_DAYS, starts: [] });
@@ -798,7 +807,7 @@ const shown = (id) => $(id).classList.contains('show');
   });
   let wTotal = 0;
   for (let i = 0; i < 20; i++) {
-    eW.bearing = 0;   // 锁定大致向北：ROLL 仍会 ±90° 转向，这里验证"累计位移"而非方向
+    eW.bearing = 0;   // 每段都锁一次方向：否则 ROLL 的随机转向会让"净位移"随机游走（测试 flaky）
     await eW._planNext(true);
     if (!eW.route) { console.log(`  [diag] W 段${i + 1} 无路线`); break; }
     wTotal += eW.route.distance;
@@ -1082,6 +1091,44 @@ const shown = (id) => $(id).classList.contains('show');
   ok('关闭出发记录面板', !shown('maskSessions'));
   SESSIONS_STUB = oldSessions;
   win.confirm = oldConfirm;
+
+  // V：同步时选择用哪份存档（带数据时间 + 机器名）
+  console.log('\n== V. 同步前选择存档（时间戳 + 机器名） ==');
+  const oldArchives = ARCHIVES_STUB;
+  const T1 = new Date(2026, 8, 16, 17, 23).getTime();    // 数据最新
+  const T2 = new Date(2026, 8, 16, 12, 5).getTime();
+  ARCHIVES_STUB = [
+    { mailId: 42, label: '2026-09-16 17:23（数据到）· 客厅电脑', dataAt: T1, dataEndAt: T1, machine: '客厅电脑', mailDate: T1 + 120000, legacy: false, days: 3, points: 500, places: 28 },
+    { mailId: 41, label: '2026-09-16 12:05（数据到）· 办公室电脑', dataAt: T2 + 3600000, dataEndAt: T2, machine: '办公室电脑', mailDate: T1 + 300000, legacy: false, days: 2, points: 300, places: 10 },
+  ];
+  PULL_BODIES.length = 0;
+  $('btnSync').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(400);
+  ok('多份存档时弹出选择框', shown('maskPickArc'));
+  ok('列出候选（含机器名与数据时间）', $('pickArcBody').textContent.indexOf('客厅电脑') >= 0
+    && $('pickArcBody').textContent.indexOf('办公室电脑') >= 0
+    && $('pickArcBody').textContent.indexOf('09-16 17:23') >= 0);
+  ok('显示「数据到」口径与规模（天数/点数/地点数）', $('pickArcBody').textContent.indexOf('数据到') >= 0
+    && $('pickArcBody').textContent.indexOf('3 天') >= 0
+    && $('pickArcBody').textContent.indexOf('28 个地点') >= 0);
+  ok('默认选中数据最新的那一份', $('pickArcBody').querySelector('input[name="pickArc"]:checked').value === '42',
+    $('pickArcBody').querySelector('input[name="pickArc"]:checked').value);
+  ok('标注了「数据最新，建议用这份」', $('pickArcBody').textContent.indexOf('数据最新') >= 0);
+  $('btnPickArcGo').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(400);
+  ok('按选择请求对应那一封', PULL_BODIES.some((b) => b && Number(b.mailId) === 42), JSON.stringify(PULL_BODIES));
+  ok('日志写明用了哪份（含机器名与时间）', $('logList').textContent.indexOf('客厅电脑') >= 0,
+    $('logList').textContent.slice(-160));
+  ok('选择框已关闭', !shown('maskPickArc'));
+  // 取消路径：不应发起同步
+  PULL_BODIES.length = 0;
+  $('btnSync').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(350);
+  $('btnPickArcCancel').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(300);
+  ok('取消后不发起同步', PULL_BODIES.length === 0, JSON.stringify(PULL_BODIES));
+  ok('取消有明确提示', $('logList').textContent.indexOf('已取消同步') >= 0);
+  ARCHIVES_STUB = oldArchives;
 
   console.log('\n===== UI 测试结果：' + pass + ' 通过 / ' + fail + ' 失败 =====');
   if (errors.length) { console.log('\n捕获到的错误：'); errors.slice(0, 10).forEach((e) => console.log('  - ' + e)); }

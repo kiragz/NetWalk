@@ -164,12 +164,39 @@ function smtpSend(opts) {
   });
 }
 
-function archiveSubject() { return `NetWalk 存档码（${new Date().toISOString().slice(0, 10)}）`; }
+/** 本机名称：优先用设置里填的，否则取主机名；只用于在存档邮件里区分是哪台设备 */
+function machineLabel(cfg) {
+  const n = String((cfg && cfg.machineName) || '').trim();
+  if (n) return n.slice(0, 24);
+  try {
+    const os = require('os');
+    return String(os.hostname() || '').slice(0, 24) || '未命名设备';
+  } catch (_) { return '未命名设备'; }
+}
 
-function archiveBody(archiveCode, extraText) {
+/**
+ * 存档邮件主题：带上「数据时间 + 机器名」。
+ * 以前只有日期，同一天发多封（每小时自动存档）主题完全一样，
+ * 同步时无法判断哪封是哪台机器、哪一刻的数据 —— 会出现"同步了但没从最新位置继续"。
+ */
+function archiveSubject(cfg) {
+  const d = new Date();
+  const p = (x) => String(x).padStart(2, '0');
+  const stamp = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
+  return `NetWalk 存档 ${stamp} · ${machineLabel(cfg)}`;
+}
+
+function archiveBody(archiveCode, extraText, cfg) {
+  const d = new Date();
+  const p = (x) => String(x).padStart(2, '0');
+  const stamp = `${d.getFullYear()}-${p(d.getMonth() + 1)}-${p(d.getDate())} ${p(d.getHours())}:${p(d.getMinutes())}`;
   return [
     '这是你的 NetWalk 漫游存档码。',
     '在另一台电脑的 NetWalk 里：点「存档」→ 粘贴到「导入」框 → 点「导入并合并」，即可接着走。',
+    '',
+    `本机名称：${machineLabel(cfg)}`,
+    `数据打包时间：${stamp}`,
+    '（同步时 NetWalk 会用「数据打包时间」最新的一份，避免用旧数据覆盖新进度）',
     '',
     '----- 存档码开始 -----',
     archiveCode,
@@ -195,7 +222,7 @@ function sendArchiveMail(cfg, to, archiveCode, onLog, extraText) {
   if (!configured(cfg)) return Promise.resolve({ ok: false, error: '未配置 SMTP（mailSmtpHost / mailUser / mailPass）' });
   if (!to) return Promise.resolve({ ok: false, error: '收件人为空（请先在设置里填邮箱账号）' });
   if (!archiveCode) return Promise.resolve({ ok: false, error: '存档码为空' });
-  const raw = buildMessage(cfg, to, archiveSubject(), archiveBody(archiveCode, extraText));
+  const raw = buildMessage(cfg, to, archiveSubject(cfg), archiveBody(archiveCode, extraText, cfg));
   return smtpSend({
     host: cfg.mailSmtpHost,
     port: Number(cfg.mailSmtpPort) || 465,
@@ -239,4 +266,5 @@ function sendArchiveMailNow() { return sendArchiveMail.apply(null, arguments); }
 module.exports = {
   sendArchiveMail, sendArchiveMailNow, sendMail,
   smtpSend, buildMessage, configured: configured, mailConfigured: configured,
+  archiveSubject, machineLabel,
 };
