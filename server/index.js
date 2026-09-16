@@ -728,8 +728,7 @@ app.post('/api/track/restore-backup', (req, res) => {
   }
 });
 
-app.post('/api/session/start', (req, res) => {
-  const body = req.body || {};
+app.post('/api/session/start', (req, res) => {  const body = req.body || {};
   const date = body.date || todayStr();
   store.setContext(date, { city: body.city, scope: body.scope });
   // 记录本次出发的起点 + 全局序号（主地图紫点显示「第 N 次出发」）
@@ -739,6 +738,14 @@ app.post('/api/session/start', (req, res) => {
   }
   walkingNow = true;
   lastHourlyMailAt = Date.now();   // 每小时自动存档从出发时刻起算
+  // 「指定的继续点」是一次性的：这次已经从那里出发了，立刻清掉。
+  // 否则它会永久生效 —— 之后你走了新路，下次出发仍被拉回那个旧点
+  // （就是「读了存档却没从上次结束点继续」的真凶）。
+  if (config.resumePoint) {
+    logLine(`session start consumed resumePoint #${config.resumePoint.n || '?'} @${config.resumePoint.lat},${config.resumePoint.lng}`);
+    config.resumePoint = null;
+    saveConfig(config);
+  }
   res.json({ ok: true, sessionNo: n });
 });
 

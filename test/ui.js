@@ -113,6 +113,7 @@ let SESSIONS_STUB = { ok: true, starts: [], resume: null };   // /api/sessions �
 const SESSION_POSTS = [];  // 记录 session 相关 POST（回滚 / 单删 / 取消指定）
 let ARCHIVES_STUB = [];    // /api/mailbox/archives 候选存档桩
 const PULL_BODIES = [];    // 记录 /api/mailbox/pull 的请求体（校验选了哪一封）
+let LASTPOS_AT = Date.now();   // /api/lastpos 返回的最新点时间戳（校验"指定继续点是否过期"）
 win.fetch = function (url, opt) {
   const u = String(url);
   calls.push((opt && opt.method ? opt.method : 'GET') + ' ' + u);
@@ -136,7 +137,7 @@ win.fetch = function (url, opt) {
   if (u.indexOf('/api/track/range') === 0) return json({ ok: true, days: TRACK_RANGE_DAYS, starts: [] });
   if (u.indexOf('/api/lastpos') === 0) {
     const lastPt = FAKE_TRACK[FAKE_TRACK.length - 1];
-    return json({ ok: true, date: TODAY, lat: lastPt.lat, lng: lastPt.lng, road: lastPt.road || '' });
+    return json({ ok: true, date: TODAY, lat: lastPt.lat, lng: lastPt.lng, road: lastPt.road || '', at: LASTPOS_AT });
   }
   if (u.indexOf('/api/achievements') === 0) {
     return json({ ok: true, newly: ['dist_first'], unlocked: { dist_first: Date.now(), dist_5k: Date.now(), spd_run: Date.now(), roll_10: Date.now() }, total: 36, got: 4, agg: FAKE_AGG });
@@ -925,6 +926,8 @@ const shown = (id) => $(id).classList.contains('show');
   // R：收集册随走过的路实时采集（v0.9.37）
   console.log('\n== R. 收集册按路实时采集 ==');
   const D = win.NetWalkDebug;
+  D.stopPlaceCollector();     // 关掉前面遗留的采集定时器，避免它的上报混进计数
+  try { if (D.state.engine && typeof D.state.engine.stop === 'function') D.state.engine.stop(); } catch (_) { /* 停掉遗留引擎 */ }
   D.state.provider = ap;                       // 换成高德 mock provider
   ap.placeSearch.searchNearBy = (k, c, r, cb) => cb('complete', {
     poiList: {
@@ -1129,6 +1132,85 @@ const shown = (id) => $(id).classList.contains('show');
   ok('取消后不发起同步', PULL_BODIES.length === 0, JSON.stringify(PULL_BODIES));
   ok('取消有明确提示', $('logList').textContent.indexOf('已取消同步') >= 0);
   ARCHIVES_STUB = oldArchives;
+
+  // W：沿路搜索目标地点（走到新路就把这条路上的地点找出来）
+  console.log('\n== W. 沿路搜索目标地点 ==');
+  const D2 = win.NetWalkDebug;
+  D2.stopPlaceCollector();          // 关掉前面小节遗留的采集定时器，避免干扰计数
+  const searched = [];
+  const NAMED_CATS = ['医院', '中学', '小学', '大学', '图书馆', '博物馆', '政府机关', '车站', '体育场馆', '地标景点'];
+  ap._ready = true;
+  ap.placeSearch.searchNearBy = (k, c, r, cb) => {
+    // 记录每次搜索的坐标（校验"沿路多点搜索"而不是只搜脚下）
+    const lat = Number(c.lat != null ? c.lat : (c.getLat ? c.getLat() : 0));
+    const lng = Number(c.lng != null ? c.lng : (c.getLng ? c.getLng() : 0));
+    searched.push({ lat, lng });
+    cb('complete', { poiList: { pois: [{ name: '测试医院' + searched.length, type: '医疗保健服务;综合医院', location: new AMapMock.LngLat(lng, lat) }] } });
+  };
+  D2.state.provider = ap;
+  D2.state.started = true;
+  D2.state.roadScanned = new Map();
+  D2.state.engine = {
+    pos: { lat: 23.10, lng: 113.30 },
+    road: '测试路',
+    route: {
+      distance: 900,
+      steps: [
+        { road: '测试路', distance: 300, path: [{ lat: 23.10, lng: 113.30 }, { lat: 23.101, lng: 113.301 }, { lat: 23.102, lng: 113.302 }] },
+        { road: '别的路', distance: 600, path: [{ lat: 23.11, lng: 113.31 }] },
+      ],
+    },
+  };
+  const pts = D2.roadSearchPoints('测试路');
+  ok('能取到当前路沿途的搜索点（含当前位置，且不含别的路）', pts.length === 3
+    && pts.some((p) => Math.abs(p.lat - 23.102) < 1e-9) && !pts.some((p) => Math.abs(p.lat - 23.11) < 1e-9),
+    JSON.stringify(pts));
+  searched.length = 0;
+  PLACES_POSTS.length = 0;
+  await D2.scanAlongRoad('测试路', 5);
+  await sleep(120);
+  ok('沿路多点搜索（不是只搜脚下）', searched.length >= 3, '搜索点 ' + searched.length + ' 个');
+  // 只统计"整条上报都属于测试路"的那些请求（其它小节遗留的引擎回调会带别的路名）
+  const roadPosts = PLACES_POSTS.filter((x) => x && x.places && x.places.every((p) => p.road === '测试路'));
+  const allPlaces = roadPosts.flatMap((x) => x.places);
+  ok('沿路搜到的地点都归到这条路名下', allPlaces.length >= 3,
+    allPlaces.map((p) => p.name + '/' + p.road).join('、') || '无');
+  ok('日志写明沿路收集数量', $('logList').textContent.indexOf('测试路 沿途收集到') >= 0);
+  // 同一片区域不重复搜（省调用量）：只统计"测试路那几个点"上的搜索，
+  // 避免被其它小节遗留的引擎回调（会在别的路上搜索）干扰计数
+  const isMine = (p) => [[23.1, 113.3], [23.101, 113.301], [23.102, 113.302]]
+    .some(([la, ln]) => Math.abs(p.lat - la) < 0.0005 && Math.abs(p.lng - ln) < 0.0005);
+  searched.length = 0;
+  PLACES_POSTS.length = 0;
+  await D2.scanAlongRoad('测试路', 5);
+  await sleep(100);
+  const mine = searched.filter(isMine);
+  ok('已搜过的路段不重复搜索', mine.length === 0 && PLACES_POSTS.length === 0,
+    '本路搜索 ' + mine.length + ' 次 / 上报 ' + PLACES_POSTS.length + ' 次');
+  D2.state.started = false;
+  D2.state.provider = null;
+  D2.state.engine = null;
+
+  // X：指定的继续点比最新数据旧时，改为从最新位置继续（"读了存档却没接着走"的真凶）
+  console.log('\n== X. 继续点过期判定 ==');
+  const D3 = win.NetWalkDebug;
+  D3.state.cfg = D3.state.cfg || {};
+  const nowMs = Date.now();
+  LASTPOS_AT = nowMs;
+  D3.state.cfg.resumePoint = { n: 30, date: TODAY, lat: 23.0000, lng: 113.0000, t: nowMs - 3600000 };   // 一小时前的旧点
+  const posStale = await D3.findLastPosition();
+  ok('指定继续点过期时改用最新位置', !!posStale && Math.abs(posStale.lat - FAKE_TRACK[FAKE_TRACK.length - 1].lat) < 1e-6
+    && Math.abs(posStale.lng - FAKE_TRACK[FAKE_TRACK.length - 1].lng) < 1e-6,
+    JSON.stringify(posStale));
+  ok('过期后仍在日志里说明原因', $('logList').textContent.indexOf('指定的继续点') >= 0);
+  ok('过期后顺手清掉服务端的旧指定', SESSION_POSTS.some((x) => x.path === 'resume' && x.body.n === 0), JSON.stringify(SESSION_POSTS.slice(-2)));
+  ok('本地缓存也清掉', !D3.state.cfg.resumePoint, JSON.stringify(D3.state.cfg.resumePoint));
+  // 指定点比最新数据新 → 尊重指定（回滚后立即出发的场景）
+  D3.state.cfg.resumePoint = { n: 31, date: TODAY, lat: 23.2000, lng: 113.2000, t: nowMs + 60000 };
+  const posFresh = await D3.findLastPosition();
+  ok('指定继续点比最新数据新时按指定执行', !!posFresh && Math.abs(posFresh.lat - 23.2) < 1e-6 && posFresh.fromSession === 31,
+    JSON.stringify(posFresh));
+  D3.state.cfg.resumePoint = null;
 
   console.log('\n===== UI 测试结果：' + pass + ' 通过 / ' + fail + ' 失败 =====');
   if (errors.length) { console.log('\n捕获到的错误：'); errors.slice(0, 10).forEach((e) => console.log('  - ' + e)); }

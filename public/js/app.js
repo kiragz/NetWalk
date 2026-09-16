@@ -632,6 +632,11 @@
       pickFormalPois,
       normalizePlace,
       collectPlacesNow,
+      scanAlongRoad,
+      roadSearchPoints,
+      startPlaceCollector,
+      stopPlaceCollector,
+      findLastPosition,
       showMapBanner,
       hideMapBanner,
       runAmapDiag,
@@ -974,19 +979,31 @@
   }
   /** 找"下次出发的位置"：① 手动指定的出发点优先 ② 否则最近一次走过的位置（跨天续走） */
   async function findLastPosition() {
-    // ① 用户在「出发点管理」里指定了从第 N 次出发的起点继续
-    const rp = state.cfg && state.cfg.resumePoint;
-    if (rp && Number.isFinite(Number(rp.lat)) && Number.isFinite(Number(rp.lng))) {
-      return { lng: Number(rp.lng), lat: Number(rp.lat), date: rp.date || '', fromSession: Number(rp.n) || 0 };
-    }
+    let lp = null;
     try {
-      const lp = await fetch('/api/lastpos').then((r) => r.json()).catch(() => null);
-      if (lp && lp.pos !== null && isFiniteLatLng(lp)) {
-        return { lng: Number(lp.lng), lat: Number(lp.lat), date: lp.date };
+      const j = await fetch('/api/lastpos').then((r) => r.json()).catch(() => null);
+      if (j && j.pos !== null && isFiniteLatLng(j)) {
+        lp = { lng: Number(j.lng), lat: Number(j.lat), date: j.date, t: Number(j.at) || 0 };
       }
     } catch (_) { /* 离线时忽略 */ }
-    return null;
+    const rp = state.cfg && state.cfg.resumePoint;
+    if (rp && Number.isFinite(Number(rp.lat)) && Number.isFinite(Number(rp.lng))) {
+      const rpT = Number(rp.t) || 0;
+      // 指定的继续点如果比最新数据还旧（说明之后又走过路），就以最新位置为准 ——
+      // 否则每次出发都会被拉回那个旧点（"读了存档却没从上次结束点继续"的经典表现）。
+      if (rpT && lp && lp.t && lp.t > rpT + 1000) {
+        log(`⚠ 指定的继续点（${new Date(rpT).toLocaleString('zh-CN')}）比最新数据（${new Date(lp.t).toLocaleString('zh-CN')}）旧，已改为从最新位置继续`);
+        if (state.cfg) state.cfg.resumePoint = null;
+        postJson('/api/session/resume', { n: 0 }, 8000).catch(() => {});
+        return rpOrLp(lp);
+      }
+      return { lng: Number(rp.lng), lat: Number(rp.lat), date: rp.date || '', fromSession: Number(rp.n) || 0 };
+    }
+    return rpOrLp(lp);
   }
+
+  /** 兜底：没有最新位置就返回 null（引擎会用出发点） */
+  function rpOrLp(lp) { return lp && isFiniteLatLng(lp) ? { lng: lp.lng, lat: lp.lat, date: lp.date || '' } : null; }
 
   /**
    * 要不要在出发前问「先同步存档」：
@@ -1613,6 +1630,76 @@
     return out;
   }
 
+  /** 网格键（约 130 米）：同一条路上重复扫同一片区域没意义，用它去重 */
+  function roadGridKey(p) { return `${Math.round(p.lat / 0.0012)}_${Math.round(p.lng / 0.0012)}`; }
+
+  /**
+   * 收集「这条路上值得搜的点」：当前位置 + 本次路线中该路段的路径点。
+   * 这样走进一条新路时就能把这条路沿途的目标地点一次找出来，
+   * 而不是只搜脚下 100 米（原来就是后者 —— 所以「不按走到的路更新」）。
+   */
+  function roadSearchPoints(road) {
+    const out = [];
+    const seenKey = new Set();
+    const add = (lat, lng) => {
+      const la = Number(lat), ln = Number(lng);
+      if (!Number.isFinite(la) || !Number.isFinite(ln)) return;
+      const k = roadGridKey({ lat: la, lng: ln });
+      if (seenKey.has(k)) return;     // 同一片 130 米网格只搜一次（省调用量）
+      seenKey.add(k);
+      out.push({ lat: la, lng: ln });
+    };
+    const e = state.engine;
+    if (e && e.pos && Number.isFinite(e.pos.lat)) add(e.pos.lat, e.pos.lng);
+    const steps = (e && e.route && e.route.steps) || [];
+    for (const st of steps) {
+      if (String(st.road || '').trim() !== road) continue;
+      for (const p of (st.path || [])) {
+        if (p == null) continue;
+        const lat = (p.lat != null) ? p.lat : (typeof p.getLat === 'function' ? p.getLat() : NaN);
+        const lng = (p.lng != null) ? p.lng : (typeof p.getLng === 'function' ? p.getLng() : NaN);
+        add(lat, lng);
+      }
+    }
+    return out;
+  }
+
+  /**
+   * 沿当前所在的路搜索目标地点：每约 130 米取一个搜索点（最多 maxPts 个），
+   * 结果只留到这条路 ≤100 米的正式场所，归到这条路名下。
+   */
+  async function scanAlongRoad(road, maxPts) {
+    if (!road || !state.started || !state.provider || state.provider.name !== 'amap') return;
+    if (!state.roadScanned) state.roadScanned = new Map();
+    let seen = state.roadScanned.get(road);
+    if (!seen) { seen = new Set(); state.roadScanned.set(road, seen); }
+    if (seen.size > 60) return;                       // 单条路最多扫 60 个网格，防爆量
+    const cand = [];
+    for (const p of roadSearchPoints(road)) {
+      const k = roadGridKey(p);
+      if (seen.has(k)) continue;
+      seen.add(k);                                    // 先占位：失败也不反复请求同一片
+      cand.push(p);
+      if (cand.length >= (maxPts || 5)) break;
+    }
+    if (!cand.length) return;
+    let added = 0;
+    for (const c of cand) {
+      try {
+        const pois = await state.provider.nearbyPlaces(c);
+        const list = pickFormalPois(pois, c, road);
+        if (!list.length) continue;
+        const w = await postJson('/api/places/add', { date: today(), places: list }, 8000);
+        if (w && w.added) added += w.added;
+      } catch (_) { /* 单点失败不影响其他点 */ }
+    }
+    if (added) {
+      log(`📔 ${road} 沿途收集到 ${added} 个正式地点`);
+      albumCache = null;
+      refreshAlbumIfOpen();
+    }
+  }
+
   /** 采集一次：以当前位置搜路两侧 100 米内的正式场所，归到当前所在路名下 */
   async function collectPlacesNow(force) {
     if (!state.started || !state.provider || state.provider.name !== 'amap') return;
@@ -1620,7 +1707,7 @@
     if (!pos || !Number.isFinite(pos.lat)) return;
     if (!force && state.lastCollectPos) {
       const moved = haversineKm(state.lastCollectPos, pos) * 1000;
-      if (moved < 100) return;   // 没走出 100 米就不重复采（换路时会 force 采一次）
+      if (moved < 40) return;   // 走动 40 米就再采一次（原来 100 米，走一段路才更新一次，显得"不刷新"）
     }
     const now = Date.now();
     if (force && state.lastCollectAt && now - state.lastCollectAt < 3000) return;   // 换路连续触发时限流
@@ -1655,15 +1742,24 @@
 
   function startPlaceCollector() {
     stopPlaceCollector();
-    state.poiTimer = setInterval(() => collectPlacesNow(false), 20000);   // 每 20 秒采一次
+    // 每 15 秒：① 当前位置 100 米内采一次 ② 沿当前路补扫还没搜过的路段（每次最多 2 点，慢慢铺满整条路）
+    state.poiTimer = setInterval(() => {
+      collectPlacesNow(false);
+      const road = (state.engine && state.engine.road) || '';
+      if (road) scanAlongRoad(road, 2);
+      // 收集册开着就顺手刷一下（不用关掉再开）
+      if (el.maskAlbum && el.maskAlbum.classList.contains('show')) refreshAlbumIfOpen();
+    }, 15000);
     state.lastRoad = '';
-    setTimeout(() => collectPlacesNow(true), 8000);                        // 出发后 8 秒先采一次
+    state.roadScanned = new Map();
+    setTimeout(() => collectPlacesNow(true), 6000);                        // 出发后 6 秒先采一次
   }
 
   function stopPlaceCollector() {
     if (state.poiTimer) { clearInterval(state.poiTimer); state.poiTimer = null; }
     state.lastCollectPos = null;
     state.lastRoad = '';
+    state.roadScanned = new Map();
   }
 
   // ---------- 地点收集册浮层 ----------
@@ -1912,10 +2008,11 @@
     el.mLit.textContent = `${s.litCells || 0} 块`;
     updateAmapCalls();
 
-    // 走到新的一条路 → 立刻按这条路采一次地点（收集册实时跟着走的路更新）
+    // 走到新的一条路 → 立刻按这条路采集：当前位置 100 米内 + 这条路沿途（最多 5 个搜索点）
     if (state.started && s.road && s.road !== state.lastRoad) {
       state.lastRoad = s.road;
       collectPlacesNow(true);
+      scanAlongRoad(s.road, 5);
     }
 
     const t = s.totals || { rx: 0, tx: 0, keys: 0 };
