@@ -106,6 +106,9 @@
     albumNav: $('albumNav'), albumPrev: $('albumPrev'), albumNext: $('albumNext'), albumDate: $('albumDate'),
     btnSessions: $('btnSessions'), maskSessions: $('maskSessions'), sessionsBody: $('sessionsBody'), sessionsResume: $('sessionsResume'),
     btnSessionsClose: $('btnSessionsClose'), btnSessionsResumeClear: $('btnSessionsResumeClear'), btnSessionsUseOrigin: $('btnSessionsUseOrigin'),
+    maskRoads: $('maskRoads'), roadsBody: $('roadsBody'), roadsSummary: $('roadsSummary'), roadsTabs: $('roadsTabs'),
+    roadsNav: $('roadsNav'), roadsPrev: $('roadsPrev'), roadsNext: $('roadsNext'), roadsDate: $('roadsDate'),
+    btnRoadsClose: $('btnRoadsClose'), btnRoadsExport: $('btnRoadsExport'), btnRoadsExportAll: $('btnRoadsExportAll'), btnAlbumInRoads: $('btnAlbumInRoads'),
     maskPickArc: $('maskPickArc'), pickArcBody: $('pickArcBody'), btnPickArcGo: $('btnPickArcGo'), btnPickArcCancel: $('btnPickArcCancel'),
     maskQuota: $('maskQuota'), quotaBody: $('quotaBody'), btnQuota: $('btnQuota'), btnQuotaSave: $('btnQuotaSave'), btnQuotaClose: $('btnQuotaClose'),
     maskSyncFirst: $('maskSyncFirst'), btnSyncFirstGo: $('btnSyncFirstGo'), btnSyncFirstSkip: $('btnSyncFirstSkip'), syncFirstHint: $('syncFirstHint'),
@@ -653,6 +656,12 @@
       claimGrids,
       albumEnabled,
       applyAlbumVisibility,
+      openRoads,
+      renderRoads,
+      setRoadsRange,
+      stepRoadsDate,
+      buildRoadsRows,
+      exportRoadsXls,
       startPlaceCollector,
       stopPlaceCollector,
       findLastPosition,
@@ -1768,10 +1777,11 @@
   /** 收集册是否开启（关闭 = 不调高德搜索服务，额度全留给路线规划） */
   function albumEnabled() { return !(state.cfg && state.cfg.placeAlbum === false); }
 
-  /** 按收集册开关显隐相关入口（直达按钮 / 数据面板入口 / 补采按钮） */
+  /** 按收集册开关显隐相关入口（数据面板入口 / 补采按钮 / 路过面板里的收集册入口） */
   function applyAlbumVisibility() {
     const on = albumEnabled();
-    for (const el2 of [el.btnAlbumQuick, el.btnAlbum, el.btnAlbumBackfill]) {
+    // 注意：主面板的「🛣️ 今日路过」按钮不依赖收集册，始终显示（它不调用高德）
+    for (const el2 of [el.btnAlbum, el.btnAlbumBackfill, el.btnAlbumInRoads]) {
       if (el2) el2.style.display = on ? '' : 'none';
     }
     if (!on && el.maskAlbum) el.maskAlbum.classList.remove('show');
@@ -1968,6 +1978,139 @@
         const tPts = ((albumCache && albumCache.trackInfo) || {})[d.date] || 0;
         return `<div style="margin:10px 0 4px;font-weight:700;display:flex;justify-content:space-between;align-items:center"><span>📅 ${d.date} · ${d.places.length} 个 · ${entries.length} 条路${tPts ? ' · 轨迹 ' + tPts + ' 点' : ''}</span><button class="btn sm" data-backfill="${d.date}" title="沿这天的实际轨迹按类别搜索，补录漏掉的正式地点" style="padding:2px 8px">↺ 重溯补采</button></div>` + groupHtml;
       }).join('') || '<div class="hint">暂无记录</div>';
+    }
+  }
+
+  // ---------- 今日路过 / 按天回看（纯本地统计，不调用高德） ----------
+  let roadsCache = null;
+  let roadsRange = 'day';
+  let roadsDate = '';
+
+  function fmtClock(t) {
+    if (!Number(t)) return '—';
+    const d = new Date(Number(t));
+    const p = (n) => String(n).padStart(2, '0');
+    return `${p(d.getHours())}:${p(d.getMinutes())}`;
+  }
+
+  async function openRoads() {
+    if (el.maskRoads) el.maskRoads.classList.add('show');
+    if (el.roadsBody) el.roadsBody.innerHTML = '<div class="hint">加载中…</div>';
+    if (el.roadsSummary) el.roadsSummary.textContent = '正在统计今天走过的路…';
+    try {
+      roadsCache = await fetchJson('/api/roads?from=0000-01-01&to=' + today(), 12000);
+    } catch (e) {
+      roadsCache = null;
+      if (el.roadsBody) el.roadsBody.innerHTML = '<div class="hint">读取失败：' + (e && e.message ? e.message : e) + '</div>';
+      return;
+    }
+    const days = (roadsCache && roadsCache.days) || [];
+    if (!days.some((d) => d.date === roadsDate)) roadsDate = (days[0] && days[0].date) || today();
+    fillRoadsDates();
+    renderRoads();
+  }
+
+  function fillRoadsDates() {
+    if (!el.roadsDate) return;
+    const days = (roadsCache && roadsCache.days) || [];
+    el.roadsDate.innerHTML = days.map((d) => {
+      const n = (d.roads || []).length;
+      return `<option value="${d.date}"${d.date === roadsDate ? ' selected' : ''}>📅 ${d.date}${n ? `（${n} 条路）` : '（无记录）'}</option>`;
+    }).join('') || '<option value="">（还没有轨迹）</option>';
+    if (el.roadsDate.value !== roadsDate) el.roadsDate.value = roadsDate;
+  }
+
+  function setRoadsRange(range) {
+    roadsRange = (range === 'all') ? 'all' : 'day';
+    if (el.roadsTabs) {
+      for (const b of el.roadsTabs.querySelectorAll('.ach-tab')) b.classList.toggle('on', b.dataset.range === roadsRange);
+    }
+    if (el.roadsNav) el.roadsNav.style.display = (roadsRange === 'day') ? 'flex' : 'none';
+    renderRoads();
+  }
+
+  function stepRoadsDate(delta) {
+    const days = (roadsCache && roadsCache.days) || [];
+    if (!days.length) return;
+    const i = days.findIndex((d) => d.date === roadsDate);
+    const next = days[Math.max(0, Math.min(days.length - 1, (i < 0 ? 0 : i) + delta))];
+    if (!next) return;
+    roadsDate = next.date;
+    fillRoadsDates();
+    renderRoads();
+  }
+
+  function renderRoads() {
+    const days = (roadsCache && roadsCache.days) || [];
+    const shown = (roadsRange === 'day') ? days.filter((d) => d.date === roadsDate) : days;
+    let roadCount = 0;
+    let meters = 0;
+    let points = 0;
+    for (const d of shown) for (const r of (d.roads || [])) { roadCount++; meters += Number(r.meters) || 0; points += Number(r.points) || 0; }
+    if (el.roadsSummary) {
+      el.roadsSummary.textContent = roadCount
+        ? (roadsRange === 'day' ? `📅 ${roadsDate} · ` : '') + `走过 ${roadCount} 条路 · 约 ${(meters / 1000).toFixed(1)} km · ${points} 个轨迹点`
+          + '（不调用高德，0 额度消耗）'
+        : (roadsRange === 'day' ? `${roadsDate} 还没有轨迹记录。` : '还没有任何轨迹记录。');
+    }
+    if (!el.roadsBody) return;
+    const html = shown.map((d) => {
+      const roads = d.roads || [];
+      const dayTitle = `<div style="margin:10px 0 4px;font-weight:700">📅 ${d.date} · ${roads.length} 条路</div>`;
+      if (!roads.length) return dayTitle + '<div class="hint" style="padding-left:12px">这天没有路名记录</div>';
+      const rows = roads.map((r, i) => `<div style="padding:3px 0 3px 12px;display:flex;justify-content:space-between;gap:10px">
+        <span>${String(i + 1).padStart(2, '0')} <b>${r.name}</b></span>
+        <span style="opacity:.7;white-space:nowrap">${fmtClock(r.firstT)}–${fmtClock(r.lastT)} · ${r.points} 点 · ${(Number(r.meters) / 1000).toFixed(2)} km</span>
+      </div>`).join('');
+      return dayTitle + rows;
+    }).join('');
+    el.roadsBody.innerHTML = html || '<div class="hint">暂无记录</div>';
+  }
+
+  /** 生成 Excel 行（导出用；抽出来便于测试） */
+  function buildRoadsRows(scope) {
+    const days = (roadsCache && roadsCache.days) || [];
+    const shown = (scope === 'all') ? days : days.filter((d) => d.date === roadsDate);
+    const head = ['日期', '序号', '路名', '首次经过', '最后经过', '轨迹点', '里程(km)'];
+    const rows = [head];
+    for (const d of shown) {
+      (d.roads || []).forEach((r, i) => {
+        rows.push([
+          d.date, String(i + 1), r.name,
+          fmtClock(r.firstT), fmtClock(r.lastT),
+          String(r.points), (Number(r.meters) / 1000).toFixed(2),
+        ]);
+      });
+    }
+    return rows;
+  }
+
+  /** 导出为 .xls（Excel 能直接打开的 HTML 表格） */
+  function exportRoadsXls(scope) {
+    const rows = buildRoadsRows(scope);
+    if (rows.length <= 1) { log('没有可导出的路名记录'); return { ok: false, rows: 0 }; }
+    const esc = (x) => String(x == null ? '' : x).replace(/&/g, '&amp;').replace(/</g, '&lt;').replace(/>/g, '&gt;');
+    const title = (scope === 'all') ? '路过记录全部' : ('路过记录 ' + roadsDate);
+    const table = rows.map((r, i) => '<tr>' + r.map((c) => `<td${i === 0 ? ' style="font-weight:bold;background:#eee"' : ''}>${esc(c)}</td>`).join('') + '</tr>').join('');
+    const html = '<html xmlns:x="urn:schemas-microsoft-com:office:excel"><head><meta charset="utf-8">'
+      + '<!--[if gte mso 9]><xml><x:ExcelWorkbook><x:ExcelWorksheets><x:ExcelWorksheet><x:Name>' + esc(title) + '</x:Name>'
+      + '<x:WorksheetOptions><x:DisplayGridlines/></x:WorksheetOptions></x:ExcelWorksheet></x:ExcelWorksheets></x:ExcelWorkbook></xml><![endif]-->'
+      + '<style>td{mso-number-format:"\\@";border:1px solid #999;padding:2px 6px;font-family:"Microsoft YaHei",sans-serif;font-size:12px}</style>'
+      + '</head><body><table>' + table + '</table></body></html>';
+    const name = (scope === 'all' ? 'passing-roads-all' : 'passing-roads-' + roadsDate) + '.xls';
+    try {
+      const blob = new Blob(['\ufeff' + html], { type: 'application/vnd.ms-excel;charset=utf-8' });
+      const url = (window.URL && window.URL.createObjectURL) ? window.URL.createObjectURL(blob) : '';
+      if (!url) throw new Error('当前环境不支持下载');
+      const a = document.createElement('a');
+      a.href = url; a.download = name;
+      document.body.appendChild(a); a.click(); a.remove();
+      setTimeout(() => { try { window.URL.revokeObjectURL(url); } catch (_) { /* noop */ } }, 1500);
+      log(`📊 已导出「${title}」共 ${rows.length - 1} 行（${name}）`);
+      return { ok: true, rows: rows.length - 1, name };
+    } catch (e) {
+      log('导出失败：' + (e && e.message ? e.message : e));
+      return { ok: false, error: String(e && e.message ? e.message : e) };
     }
   }
 
@@ -3038,7 +3181,23 @@
     // 数据
     el.btnStats.addEventListener('click', openStats);
     el.btnAlbum.addEventListener('click', openAlbum);
-    if (el.btnAlbumQuick) el.btnAlbumQuick.addEventListener('click', openAlbum);   // 主面板「复制码/分享」之间的直达按钮
+    if (el.btnAlbumQuick) el.btnAlbumQuick.addEventListener('click', () => { openRoads().catch(() => {}); });   // 主面板：今日路过
+    // 路过记录面板
+    if (el.btnRoadsClose) el.btnRoadsClose.addEventListener('click', () => { if (el.maskRoads) el.maskRoads.classList.remove('show'); });
+    if (el.maskRoads) el.maskRoads.addEventListener('click', (e) => { if (e.target === el.maskRoads) el.maskRoads.classList.remove('show'); });
+    if (el.roadsTabs) el.roadsTabs.addEventListener('click', (e) => {
+      const btn = e.target.closest && e.target.closest('.ach-tab');
+      if (btn) setRoadsRange(btn.dataset.range || 'day');
+    });
+    if (el.roadsDate) el.roadsDate.addEventListener('change', () => { roadsDate = el.roadsDate.value || ''; renderRoads(); });
+    if (el.roadsPrev) el.roadsPrev.addEventListener('click', () => stepRoadsDate(1));
+    if (el.roadsNext) el.roadsNext.addEventListener('click', () => stepRoadsDate(-1));
+    if (el.btnRoadsExport) el.btnRoadsExport.addEventListener('click', () => { exportRoadsXls('day'); });
+    if (el.btnRoadsExportAll) el.btnRoadsExportAll.addEventListener('click', () => { exportRoadsXls('all'); });
+    if (el.btnAlbumInRoads) el.btnAlbumInRoads.addEventListener('click', () => {
+      if (!albumEnabled()) { log('⚠ 地点收集册已在设置里关闭（会调用高德搜索）。需要时到 ⚙ 设置里打开。'); return; }
+      openAlbum().catch(() => {});
+    });
 
     // 高德加载失败提示条：重试 / 诊断 / 设置 / 关闭
     if (el.btnMapRetry) el.btnMapRetry.addEventListener('click', async () => {

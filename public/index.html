@@ -28,7 +28,7 @@
   <header class="topbar" data-page-node-id="ddrJhtR5e5RhxcM4HEN3M4">
     <div class="brand" data-page-node-id="8DH2ofHV66qbHEOc2uAOXh">Net<span data-page-node-id="Gt7m3YCBqixEngqyYKio6f">Walk</span></div>
     <button class="ver-pill" id="btnAccount" title="账号与档案">👤 未登录</button>
-    <button class="ver-pill" id="btnVersion" title="查看版本更新概要">v0.9.47</button>
+    <button class="ver-pill" id="btnVersion" title="查看版本更新概要">v0.9.48</button>
     <div class="pill" id="pillMap" data-page-node-id="GjTS25Bi1mrlBafIXfCBl3">地图加载中</div>
     <div class="pill" id="pillNet" data-page-node-id="Snjd11zKSBJFXSszeLhDMN">网络采集中</div>
     <div class="pill" id="pillKey" data-page-node-id="h2AOMKNxwH67HjkAsxSCgU">击键采集中</div>
@@ -94,7 +94,7 @@
 <button class="fn-btn" id="btnSync" title="一键同步：从邮箱取回最新存档码并恢复全部配置（需已配置邮件服务）"><span>🔄</span>同步</button>
       <button class="fn-btn" id="btnReport" title="纯文字 Excel 风格报表（看上去像在加班）" data-page-node-id="6wanwqt4eIjgSbt3lmTmCr"><span data-page-node-id="7BGn9X6PFrLoHJcAEfChhU">📑</span>报表</button>
       <button class="fn-btn" id="btnCopyArc" title="一键复制存档码（方便换设备导入）" data-page-node-id="j1CFCB87kQpjy7NNEJZHYE"><span data-page-node-id="eJPVCrkqfm0dieeS99U5MV">📋</span>复制码</button>
-      <button class="fn-btn" id="btnAlbumQuick" title="地点收集册（路过收集的医院/学校/地标等）"><span>📔</span>收集册</button>
+      <button class="fn-btn" id="btnAlbumQuick" title="今日路过：今天走过的路名（纯本地统计，不调用高德）"><span>🛣️</span>今日路过</button>
       <button class="fn-btn" id="btnShare" title="生成分享图" data-page-node-id="UNwCueYkcwtFX8VnE9XaqN"><span data-page-node-id="G3KU8MRBi7nDVRvmdyeQBd">📤</span>分享</button>
     </div>
   </aside>
@@ -475,6 +475,34 @@
     <div class="modal-acts">
       <button class="btn" id="btnQuotaSave" title="保存上面的每日上限">💾 保存上限</button>
       <button class="btn primary" id="btnQuotaClose">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- 今日路过 / 按天回看（不调用高德，只用轨迹里已有的路名） -->
+<div class="modal-mask" id="maskRoads">
+  <div class="modal">
+    <h2>🛣️ 路过记录</h2>
+    <div class="desc">
+      记录当天走过的每一条路 —— 路名来自路线规划返回的数据（免费附带），
+      <b>全程不调用高德搜索/编码服务，0 额度消耗</b>。可切换日期回看，也能导出 Excel。
+    </div>
+    <div class="ach-tabs" id="roadsTabs">
+      <button class="ach-tab on" data-range="day">本日</button>
+      <button class="ach-tab" data-range="all">按天回看</button>
+    </div>
+    <div id="roadsNav" class="or-line" style="margin:6px 0 2px;align-items:center;gap:6px">
+      <button class="btn sm" id="roadsPrev" title="前一天">‹</button>
+      <select id="roadsDate" style="flex:1" title="选择要回看的日期"></select>
+      <button class="btn sm" id="roadsNext" title="后一天">›</button>
+    </div>
+    <div id="roadsSummary" class="hint" style="margin:6px 0"></div>
+    <div id="roadsBody" style="max-height:44vh;overflow:auto"></div>
+    <div class="modal-acts">
+      <button class="btn" id="btnAlbumInRoads" title="查看路过收集的医院/学校/地标等正式地点（需开启收集册，会调用高德搜索）">📔 地点收集册</button>
+      <button class="btn" id="btnRoadsExport" title="把当前显示的路过记录导出为 Excel（.xls）">📊 导出 Excel</button>
+      <button class="btn" id="btnRoadsExportAll" title="导出全部日期的路过记录">📚 导出全部日期</button>
+      <button class="btn primary" id="btnRoadsClose">关闭</button>
     </div>
   </div>
 </div>

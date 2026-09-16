@@ -289,6 +289,28 @@ p.planRoute(from, { lat: far.lat, lng: far.lng }).then(async (route) => {
   pr.clearAll();
   ok(pr.scanCount('2026-09-15') === 0, '清空收集册时搜索记录一并清空');
 
+  console.log('\n== 7.7 今日路过：路名清单（不调用高德） ==');
+  const dirRoad = path.join(SMOKE_DIR, 'roads');
+  rmBestEffort(dirRoad);
+  const sRd = new TrackStore(dirRoad);
+  sRd.appendPath('2026-09-16', [
+    { lat: 23.10, lng: 113.30, t: 1000, road: '天润路', no: 1 },
+    { lat: 23.1005, lng: 113.3005, t: 2000, road: '天润路', no: 1 },   // ~70m
+    { lat: 23.101, lng: 113.301, t: 3000, road: '广园快速路辅路', no: 1 },
+    { lat: 23.1015, lng: 113.3015, t: 4000, road: '天润路', no: 2 },   // 又走回天润路
+    { lat: 23.102, lng: 113.302, t: 5000, road: '', no: 2 },           // 无路名：不计入
+  ]);
+  const rd = sRd.roadsOn('2026-09-16');
+  ok(rd.roads.length === 2, '按天聚合出路名（无路名的点跳过）', rd.roads.map((r) => r.name).join(','));
+  ok(rd.roads[0].name === '天润路' && rd.roads[0].points === 3, '同一路名跨会话合并计数', JSON.stringify(rd.roads[0]));
+  ok(rd.roads[0].firstT === 1000 && rd.roads[0].lastT === 4000, '记录首次/最后经过时间');
+  ok(rd.roads[0].meters > 100 && rd.roads[0].meters < 200, '累计里程在合理范围（米）', String(rd.roads[0].meters));
+  ok(rd.roads[1].name === '广园快速路辅路' && rd.roads[1].points === 1, '第二条路单独统计');
+  ok(rd.roads.map((r) => r.name).join(',') === '天润路,广园快速路辅路', '按"第一次走上"的时间排序（当天走过的顺序）');
+  const rr = sRd.roadsRange('2026-09-16', '2026-09-16');
+  ok(rr.length === 1 && rr[0].date === '2026-09-16' && rr[0].roads.length === 2, '按天范围查询正常');
+  ok(sRd.roadsOn('2026-01-01').roads.length === 0, '没有轨迹的日期返回空清单');
+
   console.log('\n== 8. 聚合统计 ==');
   const agg = s2.aggregate();
   ok(agg.days === 1, '聚合天数正确', agg.days);

@@ -825,6 +825,16 @@ app.get('/api/places/summary', (req, res) => {
   res.json(placeStore.summary(from, to));
 });
 
+/** 今日路过 / 按天回看：走过的路名清单（纯本地统计，不调用高德） */
+app.get('/api/roads', (req, res) => {
+  const to = String(req.query.to || todayStr()).slice(0, 10);
+  const from = String(req.query.from || to).slice(0, 10);
+  const single = String(req.query.date || '').slice(0, 10);
+  if (single) return res.json({ ok: true, days: [store.roadsOn(single)] });
+  const days = store.roadsRange(from, to).slice(0, Number(req.query.limit) || 60);
+  res.json({ ok: true, from, to, days });
+});
+
 /**
  * 认领搜索网格：客户端在调高德搜索前先问一次"今天这片区域搜过没"，
  * 搜过的直接跳过 —— 同一天重走同一条路、来回走都不会重复消耗额度。

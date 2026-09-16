@@ -199,6 +199,52 @@ class TrackStore {
     return n;
   }
 
+  /**
+   * 某天走过的路名清单 —— **纯本地计算，不调用任何高德接口**。
+   * 路名来自路径规划返回的 steps[].road（免费附带），按时间顺序统计首次/最后经过、点数与估算里程。
+   * @returns {{date:string, roads:Array<{name:string, firstT:number, lastT:number, points:number, meters:number, sessions:number[]}>}}
+   */
+  roadsOn(date) {
+    const data = this.load(date);
+    const path = (data && data.path) || [];
+    const map = new Map();
+    let prev = null;
+    for (const p of path) {
+      const name = String(p.road || '').trim();
+      const t = Number(p.t) || 0;
+      let stepM = 0;
+      if (prev) {
+        const d = haversine(prev, p);            // 单位：米
+        if (d < 2000) stepM = d;                 // 跳变(>2km，换会话/兜底直线)不算里程
+      }
+      prev = p;
+      if (!name) continue;
+      let it = map.get(name);
+      if (!it) {
+        it = { name, firstT: t, lastT: t, points: 0, meters: 0, sessions: new Set() };
+        map.set(name, it);
+      }
+      it.points++;
+      if (t && (!it.firstT || t < it.firstT)) it.firstT = t;
+      if (t > it.lastT) it.lastT = t;
+      it.meters += stepM;
+      if (Number(p.no)) it.sessions.add(Number(p.no));
+    }
+    const roads = Array.from(map.values())
+      .map((x) => ({
+        name: x.name, firstT: x.firstT, lastT: x.lastT, points: x.points,
+        meters: Math.round(x.meters), sessions: Array.from(x.sessions).slice(0, 20),
+      }))
+      .sort((a, b) => a.firstT - b.firstT);   // 按"第一次走上"的时间排序 = 当天走过的顺序
+    return { date, roads };
+  }
+
+  /** 一段日期范围的路过记录（新日期在前），同样不调用高德 */
+  roadsRange(from, to) {
+    const dates = this.listDates().filter((d) => (!from || d >= from) && (!to || d <= to));
+    return dates.sort().reverse().map((d) => this.roadsOn(d));
+  }
+
   /** 全部出发点（按出发顺序），主地图/轨迹回看画紫点用；顺带统计每次出发的轨迹点数 */
   allSessionStarts() {
     const out = [];

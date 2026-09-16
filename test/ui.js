@@ -115,6 +115,7 @@ let ARCHIVES_STUB = [];    // /api/mailbox/archives 候选存档桩
 const PULL_BODIES = [];    // 记录 /api/mailbox/pull 的请求体（校验选了哪一封）
 let D_FRESH = false;       // /api/session/use-origin 桩：记录"下次从设定出发点出发"状态
 const SCANNED = new Set(); // 已认领的搜索网格（服务端 scan-claim 桩）
+let ROADS_STUB = [];       // /api/roads 桩（今日路过/按天回看的路名清单）
 let LASTPOS_AT = Date.now();   // /api/lastpos 返回的最新点时间戳（校验"指定继续点是否过期"）
 win.fetch = function (url, opt) {
   const u = String(url);
@@ -148,6 +149,7 @@ win.fetch = function (url, opt) {
   if (u.indexOf('/api/archive/export') === 0) return json({ ok: true, code: 'NW1.' + 'A'.repeat(300), days: 3, bytes: 7080, rawBytes: 44764 });
   if (u.indexOf('/api/archive/import') === 0) return json({ ok: true, added: 1, merged: 2, days: 4, achievements: { newly: [], unlocked: {}, total: 36, got: 4 } });
   if (u.indexOf('/api/session/end') === 0) return json({ ok: true, date: TODAY, achievements: { newly: ['dist_5k'], unlocked: {}, total: 36, got: 5 }, mail: MAIL_STUB });
+  if (u.indexOf('/api/roads') === 0) return json({ ok: true, days: ROADS_STUB });
   if (u.indexOf('/api/places/scan-claim') === 0) {
     try {
       const b = JSON.parse(opt.body || '{}');
@@ -214,6 +216,11 @@ try {
   Object.defineProperty(win.navigator, 'clipboard', {
     value: { writeText: (t) => { copied = t; return Promise.resolve(); } }, configurable: true,
   });
+} catch (_) { /* noop */ }
+// jsdom 没有 Blob URL：补上，便于测试导出
+try {
+  win.URL.createObjectURL = () => 'blob:netwalk-test';
+  win.URL.revokeObjectURL = () => {};
 } catch (_) { /* noop */ }
 
 // ---------- 加载脚本 ----------
@@ -1020,7 +1027,12 @@ const shown = (id) => $(id).classList.contains('show');
     { date: TODAY, places: [{ name: '今天的医院', cat: '医院', road: '天润路', lat: 23.1, lng: 113.3 }] },
     { date: '2026-09-14', places: [{ name: '前天的学校', cat: '中学', road: '广园快速路辅路', lat: 23.1, lng: 113.3 }] },
   ];
-  $('btnAlbumQuick').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  // 注意：主面板的 btnAlbumQuick 现在是「🛣️ 今日路过」，收集册入口改到数据面板里的 btnAlbum
+  const DAlb = win.NetWalkDebug;
+  DAlb.state.cfg = DAlb.state.cfg || {};
+  DAlb.state.cfg.placeAlbum = true;    // 本小节要测收集册，先确保它是开着的
+  DAlb.applyAlbumVisibility();
+  $('btnAlbum').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
   await sleep(300);
   ok('收集册已打开', shown('maskAlbum'));
   ok('「全部」模式列出所有天', $('albumBody').textContent.indexOf('2026-09-13') >= 0
@@ -1061,6 +1073,9 @@ const shown = (id) => $(id).classList.contains('show');
   TRACK_RANGE_DAYS = oldTrackDays;
   PLACES_DAYS = oldPlacesDays;
   $('btnAlbumClose').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  // 本小节把收集册临时打开了：恢复成关闭（默认状态），避免影响后面的额度/路过小节
+  DAlb.state.cfg.placeAlbum = false;
+  DAlb.applyAlbumVisibility();
 
   // U：出发记录（指定继续点 / 回滚 / 单次删除）
   console.log('\n== U. 出发记录：选择继续出发点 / 回滚 ==');
@@ -1160,6 +1175,8 @@ const shown = (id) => $(id).classList.contains('show');
   // W：沿路搜索目标地点（走到新路就把这条路上的地点找出来）
   console.log('\n== W. 沿路搜索目标地点 ==');
   const D2 = win.NetWalkDebug;
+  D2.state.cfg = D2.state.cfg || {};
+  D2.state.cfg.placeAlbum = true;      // 本小节测收集册的沿路搜索，需要它是开启的
   D2.stopPlaceCollector();          // 关掉前面小节遗留的采集定时器，避免干扰计数
   try { if (D2.state.lastEngineRef && typeof D2.state.lastEngineRef.stop === 'function') D2.state.lastEngineRef.stop(); } catch (_) {}
   const searched = [];
@@ -1260,9 +1277,10 @@ const shown = (id) => $(id).classList.contains('show');
   const before = SCANNED.size;
   D5.state.cfg.placeAlbum = false;      // 关闭
   D5.applyAlbumVisibility();
-  ok('关闭后隐藏收集册入口（直达按钮 / 数据面板入口 / 补采按钮）',
-    $('btnAlbumQuick').style.display === 'none' && $('btnAlbum').style.display === 'none'
-    && $('btnAlbumBackfill').style.display === 'none');
+  ok('关闭后隐藏收集册入口（数据面板入口 / 补采按钮 / 路过面板内的入口）',
+    $('btnAlbum').style.display === 'none' && $('btnAlbumBackfill').style.display === 'none'
+    && $('btnAlbumInRoads').style.display === 'none');
+  ok('主面板「今日路过」不受收集册开关影响', $('btnAlbumQuick').style.display !== 'none');
   ap._ready = true;
   D5.state.provider = ap;
   D5.state.started = true;
@@ -1295,6 +1313,7 @@ const shown = (id) => $(id).classList.contains('show');
   D5.state.engine = null;
   D5.state.cfg.placeAlbum = false;   // 测试收尾默认关闭，避免影响其它小节
   D5.applyAlbumVisibility();
+
 
   // AA：按额度桶分别计费 + 搜索用尽后降级 + 用量诊断面板
   console.log('\n== AA. 额度分桶与用量诊断 ==');
@@ -1367,6 +1386,65 @@ const shown = (id) => $(id).classList.contains('show');
   $('btnSettingsClose') && $('btnSettingsClose').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
   D4.state.cfg.freshStart = false;
   
+
+
+  // AB：今日路过（不调用高德）+ 按天回看 + 导出 Excel
+  console.log('\n== AB. 今日路过 / 按天回看 / 导出 Excel ==');
+  const D6 = win.NetWalkDebug;
+  D6.state.cfg = D6.state.cfg || {};
+  D6.state.cfg.placeAlbum = false;     // 收集册关闭状态下，今日路过必须仍然可用
+  D6.applyAlbumVisibility();
+  ok('关掉收集册后主面板「今日路过」按钮仍然显示', $('btnAlbumQuick').style.display !== 'none');
+  ok('收集册入口（路过面板里的那个）已隐藏', $('btnAlbumInRoads').style.display === 'none');
+  ROADS_STUB = [
+    { date: TODAY, roads: [
+      { name: '天润路', firstT: new Date(2026, 8, 17, 8, 5).getTime(), lastT: new Date(2026, 8, 17, 8, 32).getTime(), points: 120, meters: 1500, sessions: [1] },
+      { name: '广园快速路辅路', firstT: new Date(2026, 8, 17, 8, 33).getTime(), lastT: new Date(2026, 8, 17, 8, 50).getTime(), points: 90, meters: 1100, sessions: [1] },
+    ] },
+    { date: '2026-09-16', roads: [
+      { name: '天河路', firstT: new Date(2026, 8, 16, 19, 40).getTime(), lastT: new Date(2026, 8, 16, 19, 50).getTime(), points: 60, meters: 800, sessions: [2] },
+    ] },
+  ];
+  $('btnAlbumQuick').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(300);
+  ok('今日路过面板打开', shown('maskRoads'));
+  ok('默认显示本日的路名（按走过顺序）', $('roadsBody').textContent.indexOf('天润路') >= 0
+    && $('roadsBody').textContent.indexOf('广园快速路辅路') >= 0
+    && $('roadsBody').textContent.indexOf('天河路') < 0);
+  ok('摘要写明条数/里程并注明 0 额度', $('roadsSummary').textContent.indexOf('走过 2 条路') >= 0
+    && $('roadsSummary').textContent.indexOf('0 额度消耗') >= 0, $('roadsSummary').textContent);
+  ok('显示时间区间与里程', $('roadsBody').textContent.indexOf('08:05') >= 0 && $('roadsBody').textContent.indexOf('1.50 km') >= 0);
+  [...$('roadsTabs').children].find((b) => b.dataset.range === 'all')
+    .dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(120);
+  ok('按天回看显示多天', $('roadsBody').textContent.indexOf(TODAY) >= 0 && $('roadsBody').textContent.indexOf('2026-09-16') >= 0);
+  [...$('roadsTabs').children].find((b) => b.dataset.range === 'day')
+    .dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(120);
+  ok('本日模式显示日期选择器', $('roadsNav').style.display === 'flex');
+  $('roadsDate').value = '2026-09-16';
+  $('roadsDate').dispatchEvent(new win.Event('change'));
+  await sleep(120);
+  ok('切到 2026-09-16 只显示那天的路', $('roadsBody').textContent.indexOf('天河路') >= 0
+    && $('roadsBody').textContent.indexOf('天润路') < 0);
+  $('roadsNext').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(120);
+  ok('› 可翻天（列表新→旧，› 是更新的那天）', $('roadsDate').value === TODAY, $('roadsDate').value);
+  // 导出前把日期切回今天（前面翻到了 09-16）
+  $('roadsDate').value = TODAY;
+  $('roadsDate').dispatchEvent(new win.Event('change'));
+  await sleep(100);
+  const rowsDay = D6.buildRoadsRows('day');
+  ok('导出行含表头与当天路名', rowsDay.length === 3 && rowsDay[0][0] === '日期'
+    && rowsDay.some((r) => r[2] === '天润路'), JSON.stringify(rowsDay));
+  const rowsAll = D6.buildRoadsRows('all');
+  ok('导出全部含所有天', rowsAll.length === 4, String(rowsAll.length));
+  const ex = D6.exportRoadsXls('day');
+  ok('导出成功并写日志', ex.ok === true && ex.rows === 2 && $('logList').textContent.indexOf('已导出') >= 0,
+    JSON.stringify(ex));
+  $('btnRoadsClose').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(60);
+  ok('面板可关闭', !shown('maskRoads'));
 
   console.log('\n===== UI 测试结果：' + pass + ' 通过 / ' + fail + ' 失败 =====');
   if (errors.length) { console.log('\n捕获到的错误：'); errors.slice(0, 10).forEach((e) => console.log('  - ' + e)); }
