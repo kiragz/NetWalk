@@ -360,6 +360,27 @@ async function main() {
   ok('17.3 删除后汇总不再包含', !(sum17b.byCat || {})['医院'], JSON.stringify(sum17b).slice(0,100));
   const rm17b = await post('/api/places/remove', { date: today, name: '不存在的地点' });
   ok('17.4 删除不存在的地点返回 0', rm17b.ok && rm17b.removed === 0, JSON.stringify(rm17b).slice(0,80));
+  // 18. Key / 安全密钥：空串必须解释为"保持不变"（不能把已存的 Key 清掉）
+  await post('/api/config', { amapKey: 'E2EKEY_aaaaaaaaaaaaaaaaaaaaaaaa', amapSecurityJsCode: 'E2ESEC_bbbbbbbbbbbbbbbbbbbbbbbb' });
+  const cfg18 = await J('/api/config');
+  ok('18.1 成对写入成功', cfg18.hasKey === true && cfg18.amapKeyMasked.indexOf('E2EKEY') === 0,
+    JSON.stringify({ hasKey: cfg18.hasKey, mask: cfg18.amapKeyMasked }));
+  // 只提交安全密钥、Key 留空 → Key 必须保持原值（用户就是在这一步把 Key 弄丢的）
+  await post('/api/config', { amapSecurityJsCode: 'E2ESEC_cccccccccccccccccccccccc' });
+  const cfg18b = await J('/api/config');
+  ok('18.2 Key 留空 = 保持不变（不被清空）', cfg18b.hasKey === true && cfg18b.amapKeyMasked.indexOf('E2EKEY') === 0,
+    JSON.stringify({ hasKey: cfg18b.hasKey, mask: cfg18b.amapKeyMasked }));
+  ok('18.3 安全密钥已更新', cfg18b.amapSecurityJsCodeMasked.indexOf('E2ESEC') === 0
+    && cfg18b.amapSecurityJsCodeMasked.slice(-2) === 'cc', cfg18b.amapSecurityJsCodeMasked);
+  // Key 与密钥相同 → 忽略（多半是粘错了）
+  await post('/api/config', { amapSecurityJsCode: 'E2EKEY_aaaaaaaaaaaaaaaaaaaaaaaa' });
+  const cfg18c = await J('/api/config');
+  ok('18.4 安全密钥与 Key 相同时被忽略', cfg18c.amapSecurityJsCodeMasked.slice(-2) === 'cc', cfg18c.amapSecurityJsCodeMasked);
+  // 显式清除
+  await post('/api/config', { amapKey: '__CLEAR__', amapSecurityJsCode: '__CLEAR__' });
+  const cfg18d = await J('/api/config');
+  ok('18.5 显式 __CLEAR__ 才清除', cfg18d.hasKey === false, JSON.stringify({ hasKey: cfg18d.hasKey }));
+
   console.log(`\n===== 端到端结果：${pass} 通过 / ${fail} 失败 =====\n`);
   return fail ? 1 : 0;
 }

@@ -348,24 +348,41 @@ app.get('/api/amapcheck', async (req, res) => {
 
 app.post('/api/config', (req, res) => {
   const body = req.body || {};
+  // ⚠ 空串一律解释为"保持不变"（前端输入框留空的语义）。
+  // 以前收到 '' 会直接写空 —— 用户只改安全密钥、Key 留空时，Key 就被清空了（地图直接变演练模式）。
+  // 真要清空请用显式哨兵 '__CLEAR__'。
   if (typeof body.amapKey === 'string' && body.amapKey !== '***configured***') {
     const prev = String(config.amapKey || '');
-    config.amapKey = body.amapKey.trim();
-    // 记下"本机最后一次改 Key 的时间"：同步存档时用它判断要不要让存档里的 Key 覆盖本机
-    // （换完 Key 一同步又被改回旧 Key 的坑就是这么来的）
-    if (config.amapKey !== prev) {
-      config.keySetAt = Date.now();
-      logLine(`高德 Key 已更新：${maskKey(config.amapKey)}（${new Date(config.keySetAt).toLocaleString('zh-CN')}）`);
+    let v = body.amapKey.trim();
+    const isClear = (v === '__CLEAR__');
+    if (isClear) v = '';
+    if (isClear || v) {
+      config.amapKey = v;
+      // 记下"本机最后一次改 Key 的时间"：同步存档时用它判断要不要让存档里的 Key 覆盖本机
+      // （换完 Key 一同步又被改回旧 Key 的坑就是这么来的）
+      if (config.amapKey !== prev) {
+        config.keySetAt = Date.now();
+        logLine(config.amapKey
+          ? `高德 Key 已更新：${maskKey(config.amapKey)}（${new Date(config.keySetAt).toLocaleString('zh-CN')}）`
+          : '高德 Key 已清除（回到演练模式）');
+      }
     }
   }
   if (typeof body.amapSecurityJsCode === 'string' && body.amapSecurityJsCode !== '***configured***') {
     let sec = body.amapSecurityJsCode.trim();
-    // '__CLEAR__' 是设置里「清除安全密钥」按钮的显式信号（留空已被前端解释为"保持不变"）
-    if (sec === '__CLEAR__') sec = '';
-    // 安全密钥和 Key 一定是两个不同的值。填成一样的说明用户误把 Key 粘进了安全密钥框，
-    // 会导致高德签名校验失败（表现为地图正常但"地址解析超时"）—— 这里直接忽略，保留原值。
-    if (sec && sec === String(config.amapKey || '').trim()) sec = config.amapSecurityJsCode || '';
-    config.amapSecurityJsCode = sec;
+    // '__CLEAR__' 是设置里「清除安全密钥」按钮的显式信号
+    if (sec === '__CLEAR__') {
+      config.amapSecurityJsCode = '';
+      logLine('安全密钥已清除');
+    } else if (sec) {
+      // 安全密钥和 Key 一定是两个不同的值。填成一样的说明用户误把 Key 粘进了安全密钥框，
+      // 会导致高德签名校验失败（表现为地图正常但"地址解析超时"）—— 这里直接忽略，保留原值。
+      if (sec === String(config.amapKey || '').trim()) {
+        logLine('忽略：安全密钥与 Key 相同（多半是粘错了，已保留原值）');
+      } else {
+        config.amapSecurityJsCode = sec;
+      }
+    }
   }
   if (typeof body.machineName === 'string') {
     // 本机名称：只用于在存档邮件里区分是哪台设备（不随存档同步到别的机器）

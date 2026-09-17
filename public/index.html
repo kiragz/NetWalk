@@ -28,7 +28,7 @@
   <header class="topbar" data-page-node-id="ddrJhtR5e5RhxcM4HEN3M4">
     <div class="brand" data-page-node-id="8DH2ofHV66qbHEOc2uAOXh">Net<span data-page-node-id="Gt7m3YCBqixEngqyYKio6f">Walk</span></div>
     <button class="ver-pill" id="btnAccount" title="账号与档案">👤 未登录</button>
-    <button class="ver-pill" id="btnVersion" title="查看版本更新概要">v0.9.51</button>
+    <button class="ver-pill" id="btnVersion" title="查看版本更新概要">v0.9.52</button>
     <div class="pill" id="pillMap" data-page-node-id="GjTS25Bi1mrlBafIXfCBl3">地图加载中</div>
     <div class="pill" id="pillNet" data-page-node-id="Snjd11zKSBJFXSszeLhDMN">网络采集中</div>
     <div class="pill" id="pillKey" data-page-node-id="h2AOMKNxwH67HjkAsxSCgU">击键采集中</div>
@@ -130,6 +130,10 @@
       <label data-page-node-id="r2ds6YgOlWDCTAq14IBjHe">高德 Web 端（JS API）Key <span class="tag-opt" data-page-node-id="jAG7JnmyqeXLm4CnJBHguC">可选</span></label>
       <input type="text" id="cfgKey" placeholder="留空则使用演练模式（虚构路网，照样能玩）" autocomplete="off" data-page-node-id="awc8n8nPuDTgGB6loZprCi"/>
       <div class="hint" id="keyNow" style="margin-top:4px">🔑 当前 Key：读取中…</div>
+      <div class="btn-row" style="margin:6px 0 0">
+        <button class="btn sm" id="btnKeyEdit" title="一起更换 Key 与安全密钥（两者必须配套）">🔑 更换 Key / 安全密钥</button>
+        <button class="btn sm" id="btnKeyClear" title="清除已保存的 Key（回到演练模式）">🧹 清除</button>
+      </div>
       <div class="hint" data-page-node-id="HNX39Wf9vrz1MfPyySCHoD">
         <b data-page-node-id="BAKGvhrTr6LSclNO2TpnhR">请用你自己的手机号申请</b>，不要填别人的 Key。步骤：手机号注册
         <a href="https://console.amap.com/dev/id/phone" target="_blank" rel="noreferrer" data-page-node-id="UN7ibd2EUd5vmWAydojtHW">高德开放平台</a>
@@ -476,6 +480,31 @@
     <div class="modal-acts">
       <button class="btn" id="btnQuotaSave" title="保存上面的每日上限">💾 保存上限</button>
       <button class="btn primary" id="btnQuotaClose">关闭</button>
+    </div>
+  </div>
+</div>
+
+<!-- 更换高德 Key / 安全密钥（必须成对） -->
+<div class="modal-mask" id="maskKeyEdit">
+  <div class="modal">
+    <h2>🔑 更换高德 Key / 安全密钥</h2>
+    <div class="desc">
+      Key 和安全密钥是<b>配套的一对</b>，必须一起换：只换一个会出现「Key 与密钥不对应」，
+      表现为地图能出但地址解析/规划报错。两个值是<b>不同的两串</b>，别把 Key 粘进安全密钥框。
+    </div>
+    <div class="field">
+      <label>高德 Web 端（JS API）Key（32 位）</label>
+      <input type="text" id="keKey" placeholder="粘贴 32 位 Key" autocomplete="off"/>
+    </div>
+    <div class="field">
+      <label>安全密钥 SecurityJsCode（32 位，与 Key 配套）</label>
+      <input type="text" id="keSec" placeholder="粘贴配套的安全密钥（不是 Key 本身）" autocomplete="off"/>
+    </div>
+    <div class="hint" id="keHint" style="margin:6px 0">两个都填才能保存；保存后会自动重启漫游并刷新页面。</div>
+    <div class="modal-acts">
+      <button class="btn" id="btnKePaste" title="把剪贴板里的内容分别填进两个框（按提示顺序）">📋 帮助粘贴</button>
+      <button class="btn primary" id="btnKeSave">保存并重启漫游</button>
+      <button class="btn" id="btnKeCancel">取消</button>
     </div>
   </div>
 </div>

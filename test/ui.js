@@ -1472,6 +1472,36 @@ const shown = (id) => $(id).classList.contains('show');
   D7.state.cfg.keySetAt = 0;
   await D7.loadKeyForm();
   ok('未配置时提示演练模式', $('keyNow').textContent.indexOf('演练模式') >= 0, $('keyNow').textContent);
+
+  // AD：更换 Key / 安全密钥（必须成对，防止配成"新 Key + 旧密钥"不对应）
+  console.log('\n== AD. 更换 Key / 安全密钥 ==');
+  const D8 = win.NetWalkDebug;
+  const K = '0fa6fd9f100f3b52b119b63d7377d6f9';
+  const S = 'd2629f827dbd72138cecdc3409959635';
+  ok('两个都空 → 拒绝', D8.checkKeyPair('', '').ok === false);
+  ok('只填 Key → 拒绝（会配成不对应）', D8.checkKeyPair(K, '').ok === false, JSON.stringify(D8.checkKeyPair(K, '')));
+  ok('只填安全密钥 → 拒绝', D8.checkKeyPair('', S).ok === false);
+  ok('两个相同 → 拒绝（安全密钥不是 Key 本身）', D8.checkKeyPair(K, K).ok === false);
+  ok('非 32 位 → 拒绝', D8.checkKeyPair('abc', S).ok === false);
+  ok('合法成对 → 通过', D8.checkKeyPair(K, S).ok === true);
+  // 弹窗：填一个就保存会被拦下，且提示
+  $('btnKeyEdit').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
+  await sleep(80);
+  ok('更换弹窗打开', shown('maskKeyEdit'));
+  $('keKey').value = K;
+  $('keSec').value = '';
+  const cfgBefore = postBodies.length;
+  await D8.saveKeyPair();
+  await sleep(80);
+  ok('只填一半不发请求 + 给出提示', postBodies.length === cfgBefore && $('keHint').textContent.indexOf('安全密钥') >= 0,
+    $('keHint').textContent);
+  // 成对 → 保存并刷新
+  $('keSec').value = S;
+  await D8.saveKeyPair();
+  await sleep(120);
+  const lastCfg = postBodies[postBodies.length - 1] || {};
+  ok('成对时同时提交 Key 与密钥', lastCfg.amapKey === K && lastCfg.amapSecurityJsCode === S,
+    JSON.stringify(lastCfg).slice(0, 120));
   // 没配置 Key 时
   MAPKEY = { key: '', sec: '' };
 

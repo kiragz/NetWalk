@@ -44,6 +44,9 @@
     maskOverview: $('maskOverview'),
     ovSummary: $('ovSummary'), ovSvg: $('ovSvg'),
     cfgKey: $('cfgKey'), cfgSec: $('cfgSec'), keyNow: $('keyNow'), cfgCity: $('cfgCity'), cfgScope: $('cfgScope'), cfgMachineName: $('cfgMachineName'),
+    maskKeyEdit: $('maskKeyEdit'), keKey: $('keKey'), keSec: $('keSec'), keHint: $('keHint'),
+    btnKeyEdit: $('btnKeyEdit'), btnKeyClear: $('btnKeyClear'), btnKeSave: $('btnKeSave'),
+    btnKeCancel: $('btnKeCancel'), btnKePaste: $('btnKePaste'),
     btnFreshStart: $('btnFreshStart'), freshStartHint: $('freshStartHint'),
     cfgAlbumOn: $('cfgAlbumOn'), albumQuotaHint: $('albumQuotaHint'),
     keyNotice: $('keyNotice'),
@@ -682,6 +685,10 @@
       renderRoads,
       loadKeyForm,
       maskSecret,
+      openKeyEdit,
+      saveKeyPair,
+      checkKeyPair,
+      clearKeyPair,
       setRoadsRange,
       stepRoadsDate,
       buildRoadsRows,
@@ -1809,6 +1816,69 @@
       if (el2) el2.style.display = on ? '' : 'none';
     }
     if (!on && el.maskAlbum) el.maskAlbum.classList.remove('show');
+  }
+
+  // ---------- 更换高德 Key / 安全密钥（必须成对） ----------
+  function openKeyEdit() {
+    if (el.maskKeyEdit) el.maskKeyEdit.classList.add('show');
+    if (el.keKey) el.keKey.value = '';
+    if (el.keSec) el.keSec.value = '';
+    if (el.keHint) {
+      el.keHint.textContent = (state.keyMasked || state.secMasked)
+        ? `当前：Key ${state.keyMasked || '无'}　安全密钥 ${state.secMasked || '无'} —— 两个都要换成新的`
+        : '两个都填才能保存（Key 与安全密钥必须来自同一个 Key）';
+      el.keHint.style.color = '';
+    }
+    if (el.keKey) el.keKey.focus();
+  }
+
+  /** 校验：32 位十六进制、两个都有、两个不能相同 */
+  function checkKeyPair(k, s) {
+    const key = String(k || '').trim();
+    const sec = String(s || '').trim();
+    const isHex = (v) => /^[0-9a-fA-F]{32}$/.test(v);
+    if (!key && !sec) return { ok: false, msg: '两个都空着，没法保存' };
+    if (!key) return { ok: false, msg: '❌ 没填 Key（两个必须一起换，只换一个会不配套）' };
+    if (!sec) return { ok: false, msg: '❌ 没填安全密钥（它和 Key 是配套的，不是 Key 本身）' };
+    if (key === sec) return { ok: false, msg: '❌ 两个值一样 —— 安全密钥和 Key 是两串不同的值，别把 Key 粘进安全密钥框' };
+    if (!isHex(key)) return { ok: false, msg: '❌ Key 看着不对（应是 32 位字母数字）' };
+    if (!isHex(sec)) return { ok: false, msg: '❌ 安全密钥看着不对（应是 32 位字母数字）' };
+    return { ok: true, key, sec };
+  }
+
+  async function saveKeyPair() {
+    const r = checkKeyPair(el.keKey && el.keKey.value, el.keSec && el.keSec.value);
+    if (!r.ok) {
+      if (el.keHint) { el.keHint.textContent = r.msg; el.keHint.style.color = 'var(--hot,#ff5c5c)'; }
+      log(r.msg);
+      return { ok: false, error: r.msg };
+    }
+    try {
+      const res = await postJson('/api/config', { amapKey: r.key, amapSecurityJsCode: r.sec, provider: 'amap' }, 8000);
+      if (res && res.ok !== false) {
+        if (state.cfg) { state.cfg.keySetAt = Date.now(); }
+        log(`🔑 已更换 Key：${maskSecret(r.key)}　安全密钥：${maskSecret(r.sec)} —— 正在重启漫游…`);
+        if (el.maskKeyEdit) el.maskKeyEdit.classList.remove('show');
+        if (el.maskSettings) el.maskSettings.classList.remove('show');
+        setTimeout(() => location.reload(), 700);
+        return { ok: true, key: r.key };
+      }
+      if (el.keHint) { el.keHint.textContent = '保存失败，请重试'; el.keHint.style.color = 'var(--hot,#ff5c5c)'; }
+      return { ok: false, error: 'save failed' };
+    } catch (e) {
+      if (el.keHint) { el.keHint.textContent = '保存失败：' + (e && e.message ? e.message : e); el.keHint.style.color = 'var(--hot,#ff5c5c)'; }
+      return { ok: false, error: String(e && e.message ? e.message : e) };
+    }
+  }
+
+  /** 清除已保存的 Key（回到演练模式） */
+  async function clearKeyPair() {
+    try {
+      await postJson('/api/config', { amapKey: '__CLEAR__', amapSecurityJsCode: '__CLEAR__', provider: 'drill' }, 8000);
+      log('🧹 已清除保存的 Key 与安全密钥，重启后进入演练模式（虚构路网）');
+      setTimeout(() => location.reload(), 700);
+      return { ok: true };
+    } catch (e) { log('清除失败：' + (e && e.message ? e.message : e)); return { ok: false }; }
   }
 
   /** 采集一次：以当前位置搜路两侧 100 米内的正式场所，归到当前所在路名下 */
@@ -3892,6 +3962,19 @@ el.btnReport.addEventListener('click', () => {
     });
 
     // 清除安全密钥：地址解析一直超时时的排查手段（若 Key 没开「静态安全密钥」，填了反而被拒）
+    // Key：成对更换 / 清除
+    if (el.btnKeyEdit) el.btnKeyEdit.addEventListener('click', () => openKeyEdit());
+    if (el.btnKeCancel) el.btnKeCancel.addEventListener('click', () => { if (el.maskKeyEdit) el.maskKeyEdit.classList.remove('show'); });
+    if (el.maskKeyEdit) el.maskKeyEdit.addEventListener('click', (e) => { if (e.target === el.maskKeyEdit) el.maskKeyEdit.classList.remove('show'); });
+    if (el.btnKeSave) el.btnKeSave.addEventListener('click', () => { saveKeyPair(); });
+    if (el.btnKePaste) el.btnKePaste.addEventListener('click', () => {
+      if (el.keHint) el.keHint.textContent = '顺序：先在控制台复制 Key → 粘进第一个框；再复制「安全密钥」→ 粘进第二个框。两串一定不同。';
+    });
+    if (el.btnKeyClear) el.btnKeyClear.addEventListener('click', async () => {
+      if (win.confirm && !win.confirm('确定清除已保存的 Key 与安全密钥？清除后进入演练模式（虚构路网）。')) return;
+      await clearKeyPair();
+    });
+
     if (el.btnSecClear) el.btnSecClear.addEventListener('click', async () => {
       el.btnSecClear.disabled = true;
       try {
