@@ -16,6 +16,8 @@ const { AchievementStore } = require('./achievements');
 const { exportArchive, importArchive, decodeArchive, pickCarryConfig } = require('./archive');
 const mailbox = require('./mailbox');
 const { classifyAmapProbe } = require('./amapcheck');
+const amapProxy = require('./amapproxy');
+const { isAllowedAmapUrl, fetchAmap } = amapProxy;
 const { machineLabel: mailerMachineLabel } = require('./mailer');
 const { staticMiddleware } = require('./static');
 const { IS_PACKAGED, APP_ROOT, DATA_DIR, PUBLIC_DIR } = require('./paths');
@@ -833,6 +835,28 @@ app.get('/api/roads', (req, res) => {
   if (single) return res.json({ ok: true, days: [store.roadsOn(single)] });
   const days = store.roadsRange(from, to).slice(0, Number(req.query.limit) || 60);
   res.json({ ok: true, from, to, days });
+});
+
+/**
+ * 高德请求的本机代理：浏览器连不到高德时（PAC 把 amap.com 走了境外等），
+ * 让浏览器只访问 127.0.0.1，由服务端代取 SDK / 插件 / 切片。
+ * 只允许白名单内的 https 高德域名；带内存缓存（同一 URL 不重复下载）。
+ */
+app.get('/api/amap-proxy', async (req, res) => {
+  const u = String(req.query.u || '');
+  if (!isAllowedAmapUrl(u)) return res.status(403).json({ ok: false, error: '只允许代理白名单内的高德 https 地址' });
+  const r = await fetchAmap(u, { timeout: 15000 });
+  if (!r.ok) return res.status(502).json({ ok: false, error: r.error || '代取失败' });
+  res.setHeader('Content-Type', r.type);
+  res.setHeader('Cache-Control', 'public, max-age=3600');
+  res.setHeader('X-NetWalk-Proxy', r.cached ? 'hit' : 'miss');
+  res.status(r.status).end(r.body);
+});
+
+/** 代理通道状态（自检/排障用） */
+app.get('/api/amap-proxy/stats', (req, res) => {
+  const c = amapProxy.cacheStats();
+  res.json({ ok: true, items: c.items, bytes: c.bytes });
 });
 
 /**

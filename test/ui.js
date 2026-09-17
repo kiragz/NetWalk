@@ -1348,6 +1348,17 @@ const shown = (id) => $(id).classList.contains('show');
   P._monthCalls.search = 2;
   ok(P._charge('search') === false, '月上限到量后拒绝搜索调用');
   ok(P._charge('geocode') === true, '搜索的月上限不影响地理编码');
+  // 换新 Key 后，调用量计数必须重新算（不能继承旧 Key 已累计的用量）
+  const pk1 = new win.AmapProvider({ key: 'old-key-aaaa', quota: { route: 10, search: 30 } });
+  const pk2 = new win.AmapProvider({ key: 'new-key-bbbb', quota: { route: 10, search: 30 } });
+  pk1._charge('search'); pk1._charge('search');
+  ok('旧 Key 的计数单独记', pk1.callStats().search === 2, String(pk1.callStats().search));
+  ok('新 Key 从零开始（不继承旧 Key 的用量）', pk2.callStats().search === 0, String(pk2.callStats().search));
+  ok('两个 Key 的计数互不影响', pk1._callsKey() !== pk2._callsKey(), '1=' + pk1._callsKey() + ' 2=' + pk2._callsKey());
+  ok('月度计数也按 Key 分开', pk1._monthKey() !== pk2._monthKey());
+  // 旧计数不会被误读（换 Key 后即使同名日期也是新账本）
+  pk2._charge('search');
+  ok('新 Key 自身计数正常累加', pk2.callStats().search === 1, String(pk2.callStats().search));
   P._monthBudgets.search = 800;
   // 诊断面板
   D5.state.provider = P;

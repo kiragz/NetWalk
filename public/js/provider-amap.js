@@ -93,7 +93,7 @@
     // ---------- 月度计数（月额度才是被计费的那个，单独记一份） ----------
     _monthKey() {
       const d = new Date();
-      return `netwalk-amap-month-${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}`;
+      return `netwalk-amap-month-${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${this._keyTag()}`;
     }
 
     _loadMonth() {
@@ -123,9 +123,20 @@
     }
 
     // ---------- 调用量计数（按天持久化，防止打爆高德免费额度） ----------
+    /**
+     * Key 指纹：计数必须按 Key 分开存 —— 换了新 Key 却沿用旧 Key 的累计用量，
+     * 会让新额度凭空少一大截（用户刚申请的 Key 一上来就被自己的限额挡住）。
+     */
+    _keyTag() {
+      const k = String(this.key || 'none');
+      let h = 0;
+      for (let i = 0; i < k.length; i++) h = ((h * 31) + k.charCodeAt(i)) >>> 0;
+      return h.toString(36).slice(0, 6);
+    }
+
     _callsKey() {
       const d = new Date();
-      return `netwalk-amap-calls-${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}`;
+      return `netwalk-amap-calls-${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, '0')}-${String(d.getDate()).padStart(2, '0')}-${this._keyTag()}`;
     }
 
     _loadCalls() {

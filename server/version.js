@@ -4,9 +4,19 @@
  * 版本号同时写在 package.json 的 version 字段，构建时以这里为准。
  * 新增版本时在数组**最前面**插入一项即可。
  */
-const VERSION = '0.9.49';
+const VERSION = '0.9.50';
 
 const CHANGELOG = [
+  {
+    version: '0.9.50',
+    date: '2026-09-18',
+    title: '换 Key 后调用量重新计：计数按 Key 分开存（不再继承旧 Key 已用掉的额度）',
+    items: [
+      '<b>换新高德 Key 后，调用量从零开始</b>：日/月的调用计数现在带 Key 指纹（<code>netwalk-amap-calls-&lt;日期&gt;-&lt;key指纹&gt;</code>）。以前计数只按日期存，换 Key 会<b>沿用旧 Key 已累计的用量</b>，新额度凭空少一截、甚至一上来就被自设限额挡住',
+      '<b>顺手</b>：月度计数同样按 Key 分开',
+      '测试：smoke 149 + ui 302（+5 分 Key 计数）+ e2e 75 = 526 项',
+    ],
+  },
   {
     version: '0.9.49',
     date: '2026-09-17',
