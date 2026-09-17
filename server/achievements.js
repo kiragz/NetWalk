@@ -4,6 +4,7 @@
 const fs = require('fs');
 const path = require('path');
 const ach = require('../public/js/achievements.js');
+const { atomicWrite } = require('./store');
 
 class AchievementStore {
   constructor(dir) {
@@ -30,13 +31,10 @@ class AchievementStore {
   }
 
   save() {
-    try {
-      const tmp = `${this.file}.tmp`;
-      fs.writeFileSync(tmp, JSON.stringify(this.data, null, 2), 'utf8');
-      fs.renameSync(tmp, this.file);
-    } catch (err) {
-      console.error('[achievements] 写入失败：', err.message);
-    }
+    // 用统一的原子写（唯一 tmp 名 + rename 重试 + 兜底直写）：
+    // 固定 `<file>.tmp` 在多实例/杀软占用时会 rename 失败，甚至丢数据
+    const r = atomicWrite(this.file, JSON.stringify(this.data, null, 2));
+    if (!r.ok) console.error('[achievements] 写入失败：', r.code, r.error);
   }
 
   /**

@@ -14,6 +14,53 @@ function todayStr(d = new Date()) {
 const EARTH_R = 6371000;
 const CELL_DEG = 0.00135; // 约 150m 网格，用于「点亮街区」统计
 
+let TMP_SEQ = 0;
+
+/** 同步等待（Node 主线程里也能用） */
+function sleepMs(ms) {
+  try { Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms); }
+  catch (_) { const t = Date.now(); while (Date.now() - t < ms) { /* 兜底忙等 */ } }
+}
+
+/**
+ * 原子写文件（写 tmp → rename），带三重加固（都是踩过的坑）：
+ *  ① tmp 名必须带 pid + 序号：两个实例写同一个数据目录时，固定 `<file>.tmp` 会被对方 rename 走 → ENOENT
+ *  ② rename 到被占用的目标会 EPERM/EBUSY（Windows 上杀毒软件或另一实例持有句柄）→ 短暂重试
+ *  ③ 重试用尽就直写目标文件兜底：宁可少一点原子性，也不能把内存里的轨迹丢掉
+ * @returns {{ok:boolean, mode?:string, code?:string, error?:string}}
+ */
+function atomicWrite(file, text, dir) {
+  const d = dir || path.dirname(file);
+  try { fs.mkdirSync(d, { recursive: true }); } catch (_) { /* 目录被删过就重建 */ }
+  const tmp = `${file}.${process.pid}.${++TMP_SEQ}.tmp`;
+  try {
+    fs.writeFileSync(tmp, text, 'utf8');
+  } catch (e) {
+    try {
+      fs.mkdirSync(d, { recursive: true });
+      fs.writeFileSync(file, text, 'utf8');
+      return { ok: true, mode: 'direct' };
+    } catch (e2) { return { ok: false, code: e2.code || '', error: e2.message }; }
+  }
+  const delays = [0, 40, 90, 180, 320];
+  let last = null;
+  for (let i = 0; i < delays.length; i++) {
+    if (delays[i]) sleepMs(delays[i]);
+    try {
+      fs.renameSync(tmp, file);
+      return { ok: true, mode: i ? 'retry' : 'rename' };
+    } catch (e) {
+      last = e;
+      if (!['ENOENT', 'EPERM', 'EACCES', 'EBUSY', 'EMFILE'].includes(e.code)) break;
+    }
+  }
+  try {
+    fs.writeFileSync(file, text, 'utf8');
+    try { fs.unlinkSync(tmp); } catch (_) { /* 清理临时文件 */ }
+    return { ok: true, mode: 'fallback', code: last && last.code };
+  } catch (e2) { return { ok: false, code: e2.code || '', error: e2.message }; }
+}
+
 function haversine(a, b) {
   const toRad = (x) => (x * Math.PI) / 180;
   const dLat = toRad(b.lat - a.lat);
@@ -50,8 +97,36 @@ class TrackStore {
     fs.mkdirSync(this.dir, { recursive: true });
     this.cache = new Map(); // date -> data
     this.dirty = new Set();
+    this._logState = new Map();
     this._flushTimer = setInterval(() => this.flush(), 8000);
     if (this._flushTimer.unref) this._flushTimer.unref();
+    this._claimInstanceLock(baseDir);
+  }
+
+  /**
+   * 同数据目录多实例检测：两个 NetWalk 同时写同一个 <date>.json 会互相 rename 失败、
+   * 甚至互相覆盖轨迹 —— 启动时检查锁文件，发现同目录已有活着的实例就明确提示用户。
+   */
+  _claimInstanceLock(baseDir) {
+    try {
+      this._lockFile = path.join(baseDir, 'instance.lock');
+      let prev = null;
+      try { prev = JSON.parse(fs.readFileSync(this._lockFile, 'utf8')); } catch (_) { /* 首次启动 */ }
+      if (prev && Number(prev.pid) && Number(prev.pid) !== process.pid) {
+        let alive = false;
+        try { process.kill(Number(prev.pid), 0); alive = true; } catch (_) { alive = false; }
+        if (alive && Date.now() - (Number(prev.at) || 0) < 24 * 3600 * 1000) {
+          console.error(`[store] ⚠ 另一个 NetWalk 实例（pid ${prev.pid}${prev.port ? '，端口 ' + prev.port : ''}）正在使用同一个数据目录：`);
+          console.error(`        ${baseDir}`);
+          console.error('        两个实例同时写同一天的轨迹会互相覆盖并报 rename 失败（ENOENT/EPERM）——请只保留一个实例。');
+        }
+      }
+      fs.writeFileSync(this._lockFile, JSON.stringify({
+        pid: process.pid, port: Number(process.env.NETWALK_PORT) || null, at: Date.now(),
+      }), 'utf8');
+      const drop = () => { try { if (this._lockFile) fs.unlinkSync(this._lockFile); } catch (_) { /* noop */ } };
+      process.once('exit', drop);
+    } catch (_) { /* 锁文件写不了不影响主体功能 */ }
   }
 
   file(date) {
@@ -89,20 +164,47 @@ class TrackStore {
     this.dirty.add(date);
   }
 
+  /** 写失败日志去重：同一日期每分钟最多一条，恢复时再报一次（避免日志刷屏） */
+  _logWrite(kind, date, msg) {
+    const key = 'w|' + date;
+    if (kind === 'err') {
+      const last = this._logState.get(key) || 0;
+      if (Date.now() - last < 60000) return;
+      this._logState.set(key, Date.now());
+      console.error('[store] 写入失败', date, msg);
+      console.error('        ↳ 常见原因：① 有两个 NetWalk 实例在用同一数据目录（关掉多余的那个）'
+        + ' ② 目录/文件被其它程序（杀毒、同步盘）占用或删除');
+      return;
+    }
+    if (this._logState.has(key)) {
+      this._logState.delete(key);
+      console.error('[store] 写入已恢复正常', date, msg ? '（' + msg + '）' : '');
+    }
+  }
+
   flush() {
+    const stillDirty = new Set();
     for (const date of this.dirty) {
       const data = this.cache.get(date);
       if (!data) continue;
-      try {
-        const f = this.file(date);
-        const tmp = `${f}.tmp`;
-        fs.writeFileSync(tmp, JSON.stringify(data), 'utf8');
-        fs.renameSync(tmp, f);
-      } catch (err) {
-        console.error('[store] 写入失败', date, err.message);
+      const r = atomicWrite(this.file(date), JSON.stringify(data), this.dir);
+      if (r.ok) {
+        // rename 不成功但兜底写成功了 → 说明目标被占用过，提示一次原因
+        if (r.mode === 'fallback' || r.mode === 'direct') {
+          this._logWrite('err', date, `${r.code || 'rename'} → 已改用直接写入`);
+          this._logWrite('ok', date, '后续写入恢复正常');
+        } else if (r.mode.startsWith('retry')) {
+          this._logWrite('ok', date, '目标文件曾被短暂占用');
+        } else {
+          this._logWrite('ok', date);
+        }
+      } else {
+        // 关键：失败必须保留 dirty，下个 tick 再试 —— 以前直接 clear，内存里的轨迹会永久丢失
+        stillDirty.add(date);
+        this._logWrite('err', date, `${r.code} ${r.error}`);
       }
     }
-    this.dirty.clear();
+    this.dirty = stillDirty;
   }
 
   /** 追加轨迹点（前端已按距离节流） */
@@ -689,4 +791,4 @@ class TrackStore {
   }
 }
 
-module.exports = { TrackStore, todayStr };
+module.exports = { TrackStore, todayStr, atomicWrite };

@@ -311,6 +311,55 @@ p.planRoute(from, { lat: far.lat, lng: far.lng }).then(async (route) => {
   ok(rr.length === 1 && rr[0].date === '2026-09-16' && rr[0].roads.length === 2, '按天范围查询正常');
   ok(sRd.roadsOn('2026-01-01').roads.length === 0, '没有轨迹的日期返回空清单');
 
+  console.log('\n== 7.8 原子写加固（多实例 rename 冲突 / 不丢数据） ==');
+  const { atomicWrite } = require('./store.js');
+  const dirW = path.join(SMOKE_DIR, 'atomic');
+  rmBestEffort(dirW);
+  fs.mkdirSync(dirW, { recursive: true });
+  const fW = path.join(dirW, 'a.json');
+  // ① 正常写入
+  let r1 = atomicWrite(fW, JSON.stringify({ v: 1 }));
+  ok(r1.ok === true && r1.mode === 'rename', '正常路径走 rename', JSON.stringify(r1));
+  ok(JSON.parse(fs.readFileSync(fW, 'utf8')).v === 1, '内容写入正确');
+  // ② 目录被删掉也能自愈（以前会 ENOENT）
+  fs.rmSync(dirW, { recursive: true, force: true });
+  const r2 = atomicWrite(fW, JSON.stringify({ v: 2 }));
+  ok(r2.ok === true && fs.existsSync(fW), '目录被删后自动重建并写入', JSON.stringify(r2));
+  // ③ 临时文件名必须唯一（多实例同时写时不能撞同一个 tmp —— 这就是用户遇到的 ENOENT）
+  const names = [];
+  const realWrite = fs.writeFileSync;
+  fs.writeFileSync = (p, ...rest) => { if (String(p).endsWith('.tmp')) names.push(String(p)); return realWrite(p, ...rest); };
+  atomicWrite(fW, JSON.stringify({ v: 3 }));
+  atomicWrite(fW, JSON.stringify({ v: 4 }));
+  fs.writeFileSync = realWrite;
+  ok(names.length === 2 && names[0] !== names[1] && /\.\d+\.\d+\.tmp$/.test(names[0]),
+    '临时文件名带 pid+序号（不会与另一个实例撞名）', names.join(' / '));
+  ok(fs.readdirSync(dirW).filter((x) => x.endsWith('.tmp')).length === 0, '写完不留残 tmp');
+  // ④ rename 短暂失败（被占用）→ 重试后成功
+  const store2 = new TrackStore(path.join(SMOKE_DIR, 'atomic2'));
+  store2.appendPath('2026-09-17', [{ lat: 23.1, lng: 113.3, t: 1000 }]);
+  const realRename = fs.renameSync;
+  let fails = 2;
+  fs.renameSync = (a, b) => { if (fails-- > 0) { const e = new Error('EPERM: operation not permitted'); e.code = 'EPERM'; throw e; } return realRename(a, b); };
+  store2.flush();
+  fs.renameSync = realRename;
+  ok(fails < 0 && fs.existsSync(store2.file('2026-09-17')), 'rename 被占用时重试成功', '剩余重试 ' + fails);
+  ok(store2.dirty.size === 0, '成功写入后 dirty 清空');
+  // ⑤ 一直失败 → dirty 必须保留（否则内存里的轨迹永久丢失）
+  const store3 = new TrackStore(path.join(SMOKE_DIR, 'atomic3'));
+  store3.appendPath('2026-09-17', [{ lat: 23.1, lng: 113.3, t: 2000 }]);
+  fs.renameSync = () => { const e = new Error('EPERM'); e.code = 'EPERM'; throw e; };
+  const realWF = fs.writeFileSync;
+  fs.writeFileSync = (p, ...rest) => { if (!String(p).endsWith('.tmp')) { const e = new Error('EBUSY'); e.code = 'EBUSY'; throw e; } return realWF(p, ...rest); };
+  store3.flush();
+  fs.renameSync = realRename;
+  fs.writeFileSync = realWF;
+  ok(store3.dirty.size === 1, '写不出去时保留 dirty（下个 tick 重试，不丢数据）', String(store3.dirty.size));
+  ok(store3.get('2026-09-17').path.length === 1, '内存数据仍在');
+  // ⑥ 实例锁：第二个实例在同目录启动要留下锁文件（用于提示多实例）
+  ok(fs.existsSync(path.join(SMOKE_DIR, 'atomic3', 'instance.lock')), '启动时写入 instance.lock（多实例提示用）');
+  ok(fs.existsSync(path.join(SMOKE_DIR, 'atomic3', 'tracks')), 'tracks 目录自动创建');
+
   console.log('\n== 8. 聚合统计 ==');
   const agg = s2.aggregate();
   ok(agg.days === 1, '聚合天数正确', agg.days);
