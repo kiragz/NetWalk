@@ -264,11 +264,26 @@ function parseMachineConfigText(text) {
   return out;
 }
 
+/**
+ * Key 脱敏：显示前 6 位 + 后 4 位（够用户分清"用的是哪把 Key"，又不会泄露完整值）。
+ * 换 Key 后看一眼这里就能确认生效，不用去翻配置文件。
+ */
+function maskKey(v) {
+  const s = String(v || '');
+  if (!s) return '';
+  if (s.length <= 10) return s.slice(0, 2) + '…' + s.slice(-2);
+  return s.slice(0, 6) + '…' + s.slice(-4);
+}
+
 app.get('/api/config', (req, res) => {
   res.json({
     ...config,
     amapKey: config.amapKey ? '***configured***' : '',
     amapSecurityJsCode: config.amapSecurityJsCode ? '***configured***' : '',
+    // 给界面用的指纹：能分辨新旧 Key，但不泄露完整值
+    amapKeyMasked: maskKey(config.amapKey),
+    amapSecurityJsCodeMasked: maskKey(config.amapSecurityJsCode),
+    keySetAt: Number(config.keySetAt) || 0,
     mailPass: config.mailPass ? '***configured***' : '',
     mailConfigured: Boolean(config.mailSmtpHost && config.mailUser && config.mailPass),
     mailImapConfigured: Boolean(config.mailImapHost && config.mailUser && config.mailPass),
@@ -334,7 +349,14 @@ app.get('/api/amapcheck', async (req, res) => {
 app.post('/api/config', (req, res) => {
   const body = req.body || {};
   if (typeof body.amapKey === 'string' && body.amapKey !== '***configured***') {
+    const prev = String(config.amapKey || '');
     config.amapKey = body.amapKey.trim();
+    // 记下"本机最后一次改 Key 的时间"：同步存档时用它判断要不要让存档里的 Key 覆盖本机
+    // （换完 Key 一同步又被改回旧 Key 的坑就是这么来的）
+    if (config.amapKey !== prev) {
+      config.keySetAt = Date.now();
+      logLine(`高德 Key 已更新：${maskKey(config.amapKey)}（${new Date(config.keySetAt).toLocaleString('zh-CN')}）`);
+    }
   }
   if (typeof body.amapSecurityJsCode === 'string' && body.amapSecurityJsCode !== '***configured***') {
     let sec = body.amapSecurityJsCode.trim();
@@ -1196,10 +1218,25 @@ app.post('/api/mailbox/pull', (req, res) => {
     // （手动「导入他人存档码」那条路才需要用户确认，见 /api/archive/apply-config）
     const carried = imp.cfg || {};
     const restored = [];
+    const skipped = [];
     const hadKey = Boolean(config.amapKey);
+    // Key 的时间戳守卫：本机刚换过 Key，就不要被旧存档覆盖 ——
+    // 症状很隐蔽：换完 Key 一同步（或重启时自动拉存档）就被改回旧的，用户完全看不出来自己在用哪个 Key。
+    const keyLocalSetAt = Number(config.keySetAt) || 0;
+    const archAt = Number(imp.at) || 0;
+    const keyNewerOk = () => !keyLocalSetAt || (archAt && archAt >= keyLocalSetAt);
     for (const k of ['amapKey', 'amapSecurityJsCode', 'mailSmtpHost', 'mailSmtpPort', 'mailUser', 'mailPass', 'mailImapHost', 'mailImapPort']) {
       const v = (carried[k] !== undefined) ? carried[k] : cloudConfig[k];
-      if (v !== undefined && v !== null && String(v) !== '') { config[k] = String(v); restored.push(k); }
+      if (v === undefined || v === null || String(v) === '') continue;
+      if ((k === 'amapKey' || k === 'amapSecurityJsCode') && !keyNewerOk()) { skipped.push(k); continue; }
+      config[k] = String(v); restored.push(k);
+    }
+    if (skipped.length) {
+      logLine(`mailbox pull 跳过存档里的旧 Key：本机 ${new Date(keyLocalSetAt).toLocaleString('zh-CN')} 换过 Key，`
+        + `存档 @${archAt ? new Date(archAt).toLocaleString('zh-CN') : '未知'} 更旧`);
+    }
+    if (restored.includes('amapKey')) {
+      logLine(`mailbox pull 应用存档里的 Key：${maskKey(config.amapKey)}（存档 @${archAt ? new Date(archAt).toLocaleString('zh-CN') : '未知'}）`);
     }
     if (carried.city) config.city = String(carried.city);
     if (carried.origin && Number.isFinite(Number(carried.origin.lng)) && Number.isFinite(Number(carried.origin.lat))) {
@@ -1559,6 +1596,14 @@ async function main() {
     }).catch(() => { keyMode = 'remote'; });
   }
 
+  // 补记"本机改 Key 的时间"：升级上来的配置没有这个字段，不补的话
+  // 换完 Key 后第一次同步仍会被邮箱里的旧存档盖回去（用户看不出自己在用哪把 Key）
+  if (config.amapKey && !config.keySetAt) {
+    config.keySetAt = Date.now();
+    saveConfig(config);
+    logLine(`记录当前 Key 的启用时间（升级补记）：${maskKey(config.amapKey)}`);
+  }
+
   const onListening = () => {
     if (listening) return;   // 端口冲突时回调可能被触发两次
     listening = true;
@@ -1577,7 +1622,9 @@ async function main() {
     console.log(`  网络采集  : ${netLabel} (${net.iface || '-'})`);
     console.log(`  击键采集  : ${keyLabel}`);
     console.log(`  老板键    : ${config.boss.enabled ? BOSS_LABEL(config.boss) + '（托盘图标' + (tray ? '已启用' : '未启用') + '）' : '已关闭'}`);
+    // 显示 Key 指纹：一眼确认"现在用的是哪把 Key"（换新 Key 后先看这里）
     console.log(`  地图模式  : ${config.amapKey ? '高德真实路网' : '演练模式（未配置高德 Key）'}`);
+    if (config.amapKey) console.log(`  高德 Key  : ${maskKey(config.amapKey)}${config.keySetAt ? '（本机 ' + new Date(config.keySetAt).toLocaleString('zh-CN') + ' 更新）' : ''}`);
     if (PORT !== PREFERRED_PORT) console.log(`  [i] ${PREFERRED_PORT} 被别的程序占用，已自动改用 ${PORT}`);
     if (IS_PACKAGED) console.log(`  程序目录  : ${APP_ROOT}`);
     console.log('');

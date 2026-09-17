@@ -43,7 +43,7 @@
     maskSettings: $('maskSettings'), maskDone: $('maskDone'),
     maskOverview: $('maskOverview'),
     ovSummary: $('ovSummary'), ovSvg: $('ovSvg'),
-    cfgKey: $('cfgKey'), cfgSec: $('cfgSec'), cfgCity: $('cfgCity'), cfgScope: $('cfgScope'), cfgMachineName: $('cfgMachineName'),
+    cfgKey: $('cfgKey'), cfgSec: $('cfgSec'), keyNow: $('keyNow'), cfgCity: $('cfgCity'), cfgScope: $('cfgScope'), cfgMachineName: $('cfgMachineName'),
     btnFreshStart: $('btnFreshStart'), freshStartHint: $('freshStartHint'),
     cfgAlbumOn: $('cfgAlbumOn'), albumQuotaHint: $('albumQuotaHint'),
     keyNotice: $('keyNotice'),
@@ -333,17 +333,35 @@
    * 跟邮箱配置一个道理 —— 不回填的话用户看到空框会以为没保存，把 Key 粘进安全密钥框，
    * 结果安全密钥 == Key，高德签名失败，地图正常但地址解析一直超时。
    */
+  /** 脱敏显示：前 6 位 + … + 后 4 位（够分清是哪把 Key，不会泄露完整值） */
+  function maskSecret(v) {
+    const s = String(v || '');
+    if (!s) return '';
+    if (s.length <= 10) return s.slice(0, 2) + '…' + s.slice(-2);
+    return s.slice(0, 6) + '…' + s.slice(-4);
+  }
+
   async function loadKeyForm() {
     try {
       const mk = await fetch('/api/mapkey').then((r) => r.json()).catch(() => null);
+      const keySetAt = Number((state.cfg && state.cfg.keySetAt) || 0);
       const key = (mk && mk.key) || '';
       const sec = (mk && typeof mk.securityJsCode === 'string') ? mk.securityJsCode : '';
       state.savedKey = key;
       state.savedSec = sec;
       el.cfgKey.value = '';
-      el.cfgKey.placeholder = key ? '已配置（留空保持不变）' : '留空则使用演练模式（虚构路网）';
+      el.cfgKey.placeholder = key ? `已配置：${maskSecret(key)}（留空保持不变）` : '留空则使用演练模式（虚构路网）';
       el.cfgSec.value = '';
-      el.cfgSec.placeholder = sec ? '已配置（留空保持不变）' : '启用静态安全密钥的 Key 必填（不是 Key 本身）';
+      el.cfgSec.placeholder = sec ? `已配置：${maskSecret(sec)}（留空保持不变）` : '启用静态安全密钥的 Key 必填（不是 Key 本身）';
+      // 当前用的 Key 指纹（能分辨新旧 Key，又不泄露完整值）
+      state.keyMasked = key ? maskSecret(key) : '';
+      state.secMasked = sec ? maskSecret(sec) : '';
+      if (el.keyNow) {
+        el.keyNow.textContent = key
+          ? `🔑 当前 Key：${state.keyMasked}${sec ? `　安全密钥：${state.secMasked}` : '　（未设安全密钥）'}`
+            + (keySetAt ? `　· 本机 ${new Date(keySetAt).toLocaleString('zh-CN')} 更新` : '')
+          : '🔑 当前未配置 Key（演练模式 · 虚构路网）';
+      }
       // 本机名称也要回填（否则用户以为没保存、反复重填）
       if (el.cfgMachineName) {
         const mn = String((state.cfg && state.cfg.machineName) || '');
@@ -617,6 +635,10 @@
   async function boot() {
     const res = await fetch('/api/config');
     state.cfg = await res.json();
+    if (state.cfg && state.cfg.amapKeyMasked) {
+      log(`🔑 当前高德 Key：${state.cfg.amapKeyMasked}${state.cfg.amapSecurityJsCodeMasked ? `（安全密钥 ${state.cfg.amapSecurityJsCodeMasked}）` : ''}`
+        + `${state.cfg.keySetAt ? ` · 本机 ${new Date(state.cfg.keySetAt).toLocaleString('zh-CN')} 更新` : ''}`);
+    }
     applyAlbumVisibility();        // 收集册开关：关闭时藏掉入口、停掉采集（不调高德搜索）
     const city = CITIES[state.cfg.city] ? state.cfg.city : '深圳';
     // 真正采用配置里的出发点（此前 cfg.origin 被保存却从未被前端读取）
@@ -658,6 +680,8 @@
       applyAlbumVisibility,
       openRoads,
       renderRoads,
+      loadKeyForm,
+      maskSecret,
       setRoadsRange,
       stepRoadsDate,
       buildRoadsRows,

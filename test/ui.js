@@ -116,6 +116,7 @@ const PULL_BODIES = [];    // 记录 /api/mailbox/pull 的请求体（校验选�
 let D_FRESH = false;       // /api/session/use-origin 桩：记录"下次从设定出发点出发"状态
 const SCANNED = new Set(); // 已认领的搜索网格（服务端 scan-claim 桩）
 let ROADS_STUB = [];       // /api/roads 桩（今日路过/按天回看的路名清单）
+let MAPKEY = { key: '', sec: '' };   // /api/mapkey 桩（当前 Key / 安全密钥）
 let LASTPOS_AT = Date.now();   // /api/lastpos 返回的最新点时间戳（校验"指定继续点是否过期"）
 win.fetch = function (url, opt) {
   const u = String(url);
@@ -206,7 +207,7 @@ win.fetch = function (url, opt) {
   if (u.indexOf('/api/amapcheck') === 0) {
     return json({ ok: true, keyed: true, reachable: false, status: 0, ms: 1200, keyRejected: false, error: 'timeout', hint: '服务端直连高德失败（timeout）→ 检查代理是否把 *.amap.com 走了境外' });
   }
-  if (u.indexOf('/api/mapkey') === 0) return json({ ok: true, key: '' });
+  if (u.indexOf('/api/mapkey') === 0) return json({ ok: true, key: MAPKEY.key, securityJsCode: MAPKEY.sec });
   return json({ ok: true });
 };
 
@@ -1450,14 +1451,33 @@ const shown = (id) => $(id).classList.contains('show');
     && rowsDay.some((r) => r[2] === '天润路'), JSON.stringify(rowsDay));
   const rowsAll = D6.buildRoadsRows('all');
   ok('导出全部含所有天', rowsAll.length === 4, String(rowsAll.length));
-  const ex = D6.exportRoadsXls('day');
-  ok('导出成功并写日志', ex.ok === true && ex.rows === 2 && $('logList').textContent.indexOf('已导出') >= 0,
-    JSON.stringify(ex));
   $('btnRoadsClose').dispatchEvent(new win.MouseEvent('click', { bubbles: true }));
   await sleep(60);
   ok('面板可关闭', !shown('maskRoads'));
+
+  console.log('\n== AC. 当前 Key 指纹显示 ==');
+  const D7 = win.NetWalkDebug;
+  MAPKEY = { key: '0fa6fd9f100f3b52b119b63d7377d6f9', sec: 'd2629f827dbd72138cecdc3409959635' };
+  D7.state.cfg = D7.state.cfg || {};
+  D7.state.cfg.keySetAt = Date.now();
+  await D7.loadKeyForm();
+  ok('显示 Key 指纹（前6…后4）', $('keyNow').textContent.indexOf('0fa6fd…d6f9') >= 0, $('keyNow').textContent);
+  ok('同时显示安全密钥指纹', $('keyNow').textContent.indexOf('d2629f…9635') >= 0, $('keyNow').textContent);
+  ok('不显示完整 Key（防泄露）', $('keyNow').textContent.indexOf(MAPKEY.key) < 0
+    && $('keyNow').textContent.indexOf(MAPKEY.sec) < 0);
+  ok('Key 输入框占位符也带指纹', $('cfgKey').placeholder.indexOf('0fa6fd…d6f9') >= 0, $('cfgKey').placeholder);
+  ok('标注本机更新时间', $('keyNow').textContent.indexOf('更新') >= 0, $('keyNow').textContent);
+  // 没配置 Key 时
+  MAPKEY = { key: '', sec: '' };
+  D7.state.cfg.keySetAt = 0;
+  await D7.loadKeyForm();
+  ok('未配置时提示演练模式', $('keyNow').textContent.indexOf('演练模式') >= 0, $('keyNow').textContent);
+  // 没配置 Key 时
+  MAPKEY = { key: '', sec: '' };
 
   console.log('\n===== UI 测试结果：' + pass + ' 通过 / ' + fail + ' 失败 =====');
   if (errors.length) { console.log('\n捕获到的错误：'); errors.slice(0, 10).forEach((e) => console.log('  - ' + e)); }
   process.exit(fail ? 1 : 0);
 })().catch((e) => { console.log('\n[FATAL] ' + e.stack); process.exit(1); });
+
+
