@@ -93,6 +93,68 @@ function cellKey(lat, lng) {
  * 说明旧值确实是被一小段覆盖了）才推翻旧值；否则保留引擎上报的权威值，
  * 免得把「地图尺度放大坐标位移」多算出来的几百米当成真实里程灌进去。
  */
+/** 本次进程启动后，出现过「引擎上报为极小段」的次数（供自检页/日志排查重复起步） */
+let ignoreSmallStatsCount = 0;
+/** 运行期覆盖（测试用）：null = 走默认 / 环境变量 */
+let smallStatsGuardOverride = null;
+
+/**
+ * 是否启用「极小段上报」的丢弃逻辑。
+ * 默认启用；NETWALK_KEEP_SMALL_STATS=1 可临时关掉（观察原始行为用）。
+ */
+function smallStatsGuardEnabled() {
+  if (smallStatsGuardOverride !== null) return smallStatsGuardOverride;
+  return process.env.NETWALK_KEEP_SMALL_STATS !== '1';
+}
+
+/** 运行期开关（供测试/自检切换），传 null 恢复默认 */
+function setSmallStatsGuard(v) {
+  smallStatsGuardOverride = (v === null || v === undefined) ? null : Boolean(v);
+  return smallStatsGuardEnabled();
+}
+
+/** 本进程已忽略的极小段上报次数 */
+function getIgnoredSmallStats() { return ignoreSmallStatsCount; }
+
+/**
+ * 引擎上报的汇总是否"真的走过路"。
+ *
+ * 背景：「结束漫游」时若当天已走过很久、或行进中又触发了一次出发，引擎内存里的
+ * 累计会被重置，上报的就是几秒钟的小计（实测出现过 545m / 69 步 / 43s），
+ * 覆盖掉全天成绩。这类小段的特征是 **里程 < 200m 且时长 < 60s** —— 正常出发不可能这么短。
+ * 判定为「空上报」后一律不参与合并，也不会把当天汇总改小。
+ *
+ * 里程口径从宽：有些引擎版本上报的是真实里程而另一些是地图位移（尺度可能放大），
+ * 只要任一项达到正常量级就认为这次确实走过路，绝不误伤。
+ */
+function isMeaningfulStats(s) {
+  if (!s || typeof s !== 'object') return false;
+  const dist = Number(s.distance) || 0;
+  const dur = Number(s.duration) || 0;
+  const points = Number(s.points) || 0;
+  const keys = Number(s.totalKeys) || 0;
+  const rolls = Number(s.rolls) || 0;
+  if (dist >= 200) return true;      // 正常起步就是几百米以上
+  if (dur >= 60000) return true;     // 走过 1 分钟以上
+  if (points >= 30) return true;     // 采到 30 个点
+  if (keys >= 200) return true;      // 键鼠活动量达到正常量级
+  if (rolls >= 2) return true;       // 至少做过两次路口决策
+  return false;
+}
+
+/**
+ * 落盘 / 扫描时判断「这段数据是否真的走过路」（按原始轨迹判，不依赖引擎上报）。
+ * 用途：同步时不能拿"没走过的空壳"去压掉对端的真实数据。
+ */
+function hasWalkData(data) {
+  if (!data) return false;
+  return (data.path || []).length > 0
+    || (data.samples || []).length > 0
+    || (data.rolls || []).length > 0
+    || (data.sessions || []).length > 0
+    || (Number(data.stats && data.stats.distance) || 0) > 0;
+}
+
 function recomputeDayStats(data) {
   const path = data.path || [];
   const samples = data.samples || [];
@@ -373,17 +435,44 @@ class TrackStore {
    * 记录一次出发的起点，返回全局序号（第 N 次出发，跨天累加）
    * 前端在主地图上为每个出发点画紫色小点 + 序号
    */
-  addSessionStart(date, lat, lng) {
+  /**
+   * 记录本次出发的起点，返回全局序号（第 N 次出发，跨天累加）
+   * 前端在主地图上为每个出发点画紫色小点 + 序号
+   * @param {{lat:number,lng:number,force?:boolean}} [opt]
+   *   force=true 表示用户明确要求「从这里重新出发」，此时不做重复起步去重。
+   * @returns {{n:number, reused:boolean, reason?:string}}
+   */
+  addSessionStart(date, lat, lng, opt = {}) {
+    const data = this.load(date);
+    if (!Array.isArray(data.sessions)) data.sessions = [];
+    const la = Number(Number(lat).toFixed(6));
+    const ln = Number(Number(lng).toFixed(6));
+    const now = Date.now();
+    // ① 重复提交（双击「出发」/ 页面重连补发）：同一位置 10 秒内只算一次出发。
+    //    否则会凭空多出一个"出发序号"，而引擎为这次新出发把累计清零 →
+    //    结束时上报几百米的小计，把全天汇总覆盖掉（历史故障的引信）。
+    const last = data.sessions[data.sessions.length - 1];
+    if (!opt.force && last && now - (Number(last.t) || 0) < 10000
+        && Math.abs((Number(last.lat) || 0) - la) < 1e-5
+        && Math.abs((Number(last.lng) || 0) - ln) < 1e-5) {
+      return { n: Number(last.n), reused: true, reason: '同一位置 10 秒内重复出发，沿用上一次的序号' };
+    }
+    // ② 行进中重复起步（距离上次出发 >= 10 秒但 < 3 分钟，且几乎没离开原位）：
+    //    说明上次出发点其实是误记的，把它就地挪到当前位置，而不是新增一次出发。
+    if (!opt.force && last && now - (Number(last.t) || 0) < 180000
+        && haversine({ lat: Number(last.lat) || 0, lng: Number(last.lng) || 0 }, { lat: la, lng: ln }) < 50) {
+      Object.assign(last, { lat: la, lng: ln, t: now });
+      this.markDirty(date);
+      return { n: Number(last.n), reused: true, reason: '距上次出发点不足 50m，就地修正该出发的位置' };
+    }
     let maxN = 0;
     for (const d of this.listDates()) {
       for (const s of (this.load(d).sessions || [])) maxN = Math.max(maxN, s.n || 0);
     }
-    const data = this.load(date);
-    if (!Array.isArray(data.sessions)) data.sessions = [];
     const n = maxN + 1;
-    data.sessions.push({ n, lat: Number(Number(lat).toFixed(6)), lng: Number(Number(lng).toFixed(6)), t: Date.now() });
+    data.sessions.push({ n, lat: la, lng: ln, t: now });
     this.markDirty(date);
-    return n;
+    return { n, reused: false };
   }
 
   /**
@@ -757,11 +846,22 @@ class TrackStore {
     // 本机还停留在自己的 3、4 —— 两台设备的出发次数对不上。
     cur.sessions = dedupe(cur.sessions || [], incoming.sessions);
     if (incoming.stats) {
-      if (!cur.stats || (incoming.stats.distance || 0) > (cur.stats.distance || 0)) cur.stats = incoming.stats;
+      // 空壳（当天没走过路）里的 stats 一律不参与竞争：否则另一台设备上
+      // 刚打开程序产生的空日期，会把本机这一天的真实里程/时长压回 0。
+      const incomingReal = hasWalkData(incoming);
+      const curReal = hasWalkData(cur);
+      if (!cur.stats) {
+        if (incomingReal) cur.stats = incoming.stats;
+      } else if (incomingReal || !curReal) {
+        if ((incoming.stats.distance || 0) > (cur.stats.distance || 0)) cur.stats = incoming.stats;
+      }
     }
     if (!cur.city && incoming.city) cur.city = incoming.city;
     if (Array.isArray(incoming.scopes)) cur.scopes = [...new Set([...(cur.scopes || []), ...incoming.scopes])];
     if (incoming.endedAt && !cur.endedAt) cur.endedAt = incoming.endedAt;
+    // 合并完成后按原始轨迹校正一次：跨设备拼接出来的全天数据不会因为某一段
+    // 的小计而算小（与 recomputeDayStats 同一口径，只在明显失真时才改）
+    if (hasWalkData(cur)) cur.stats = recomputeDayStats(cur);
     this.markDirty(date);
     this.flush();
     return cur;
@@ -825,10 +925,19 @@ class TrackStore {
    * 现在的口径：① 传入的 stats 只用于**补全新数据**（更大的值才采纳）
    *            ② 里程/时长再按 path + samples 全量重算一次，取较大者兜底
    */
+  /**
+   * 结束当天漫游：合并引擎上报的本次小计，并按原始轨迹兜底重算。
+   * @param {object|null} stats 引擎上报的「本次出发」汇总
+   * @returns {object} 落盘后的完整当日数据
+   */
   finish(date, stats) {
     const data = this.load(date);
     data.endedAt = Date.now();
-    if (stats && typeof stats === 'object') {
+    // 无内容的上报（几秒钟的误触发出发）直接丢弃：它只代表"没走"，不代表全天成绩。
+    // 注意 null 表示"没有数据"，与"走过但为 0"不同，仍要走重算兜底。
+    const meaningful = isMeaningfulStats(stats) || !smallStatsGuardEnabled();
+    if (!meaningful) ignoreSmallStatsCount++;
+    if (meaningful) {
       const prev = (data.stats && typeof data.stats === 'object') ? data.stats : {};
       const merged = { ...prev };
       for (const [k, v] of Object.entries(stats)) {
@@ -841,7 +950,7 @@ class TrackStore {
         merged[k] = Number.isFinite(pv) ? Math.max(pv, nv) : nv;
       }
       data.stats = merged;
-    } else if (!data.stats) {
+    } else if (stats && !data.stats) {
       data.stats = null;
     }
     // 兜底：若合并后的里程/时长仍明显小于原始轨迹能支撑的量（说明旧 stats 本就被小段覆盖过），
@@ -850,6 +959,14 @@ class TrackStore {
     this.markDirty(date);
     this.flush();
     return data;
+  }
+
+  /** 附带上报是否被采纳（供接口区分"这条小计有效/已忽略"，便于日志与测试断言） */
+  finishWithMeta(date, stats) {
+    const before = this.load(date).stats;
+    const accepted = isMeaningfulStats(stats) || !smallStatsGuardEnabled();
+    const data = this.finish(date, stats);
+    return { data, accepted, before, ignoredSmall: !accepted && Boolean(stats) };
   }
 
   /** 按当日原始数据（path/samples）重算汇总统计并落盘；返回重算后的 stats */
@@ -901,4 +1018,8 @@ class TrackStore {
   }
 }
 
-module.exports = { TrackStore, todayStr, atomicWrite };
+module.exports = {
+  TrackStore, todayStr, atomicWrite,
+  isMeaningfulStats, hasWalkData, recomputeDayStats,
+  smallStatsGuardEnabled, setSmallStatsGuard, getIgnoredSmallStats,
+};

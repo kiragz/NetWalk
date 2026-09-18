@@ -111,6 +111,8 @@ const PLACES_POSTS = [];   // 记录 /api/places/add 的载荷（收集册实时
 let PLACES_DAYS = [];      // /api/places 返回的按天数据（收集册按天回顾测试用）
 let SESSIONS_STUB = { ok: true, starts: [], resume: null };   // /api/sessions 桩
 const SESSION_POSTS = [];  // 记录 session 相关 POST（回滚 / 单删 / 取消指定）
+const SESSION_STARTS = []; // 记录 /api/session/start 的请求体（重复起步防护测试用）
+let SESSION_START_STUB = {}; // 覆盖 /api/session/start 的返回（如 reused=true）
 let ARCHIVES_STUB = [];    // /api/mailbox/archives 候选存档桩
 const PULL_BODIES = [];    // 记录 /api/mailbox/pull 的请求体（校验选了哪一封）
 let D_FRESH = false;       // /api/session/use-origin 桩：记录"下次从设定出发点出发"状态
@@ -195,6 +197,10 @@ win.fetch = function (url, opt) {
     SESSION_POSTS.push({ path: 'resume', body });
     if (!Number(body.n)) SESSIONS_STUB = { ok: true, resume: null, starts: SESSIONS_STUB.starts };
     return json({ ok: true, cleared: true });
+  }
+  if (u.indexOf('/api/session/start') === 0) {
+    try { SESSION_STARTS.push(JSON.parse(opt.body || '{}')); } catch (_) { SESSION_STARTS.push(null); }
+    return json(Object.assign({ ok: true, sessionNo: SESSION_STARTS.length, cleared: [] }, SESSION_START_STUB));
   }
   if (u.indexOf('/api/session/') === 0) return json({ ok: true, date: TODAY, achievements: { newly: ['dist_5k'], unlocked: {}, total: 36, got: 5 } });
   if (u.indexOf('/api/report/') === 0) return json({ ok: true, url: '/reports/netwalk-' + TODAY + '.html' });
@@ -1504,6 +1510,41 @@ const shown = (id) => $(id).classList.contains('show');
     JSON.stringify(lastCfg).slice(0, 120));
   // 没配置 Key 时
   MAPKEY = { key: '', sec: '' };
+
+  // AE：重复起步防护（出发防连点 + 服务端去重提示）
+  console.log('\n== AE. 重复起步防护 ==');
+  const D9 = win.NetWalkDebug;
+  // 出发防连点：连点两次只发一次 session/start。历史故障源头正是"多出来的一次出发"
+  // —— 引擎为新出发把累计清零，结束时上报几百米，把全天汇总覆盖掉。
+  D9.state.provider = {
+    name: 'drill',
+    plan: async () => ({ points: [], road: '防护路', steps: [] }),
+    moveTo: () => {},
+    setCenter: () => {},
+    addStartMarker: () => {},
+    addTrackPoint: () => {},
+    clearTrack: () => {},
+    isReady: () => false,
+  };
+  D9.state.started = false;
+  D9.state.starting = false;
+  SESSION_STARTS.length = 0;
+  const walkA = D9.startWalk();
+  const walkB = D9.startWalk();      // 立刻再点一次（模拟连点）
+  await Promise.allSettled([walkA, walkB]);
+  await sleep(150);
+  ok('出发防连点：连点两次只提交一次 session/start', SESSION_STARTS.length === 1, 'calls=' + SESSION_STARTS.length);
+  ok('出发结束后防抖标志被释放', D9.state.starting === false, String(D9.state.starting));
+  D9.state.started = false;
+  // 服务端判定为重复出发时，前端要写明原因（否则用户会疑惑"怎么还是第 N 次"）
+  if (SESSION_STARTS.length) SESSION_START_STUB = { sessionNo: 7, reused: true, reusedReason: '同一位置 10 秒内重复出发，沿用上一次的序号' };
+  $('logList').innerHTML = '';
+  await D9.startWalk();
+  await sleep(120);
+  ok('服务端去重时前端写明原因', $('logList').textContent.indexOf('沿用上一次的序号') >= 0,
+    $('logList').textContent.slice(0, 160));
+  SESSION_START_STUB = {};
+  D9.state.started = false;
 
   console.log('\n===== UI 测试结果：' + pass + ' 通过 / ' + fail + ' 失败 =====');
   if (errors.length) { console.log('\n捕获到的错误：'); errors.slice(0, 10).forEach((e) => console.log('  - ' + e)); }

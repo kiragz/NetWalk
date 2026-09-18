@@ -241,15 +241,17 @@ async function main() {
   console.log('\n== 12. 出发次数合并与全局重排 ==');
   // 本机先出发 3 次（n=1,2,3）→ 导出存档 → 本机又出发 2 次（n=4,5）→ 导入存档（模拟另一台设备的数据回来）
   // 合并后出发记录应去重并全局重排为 1..5，下一次出发 = 6
-  for (let i = 0; i < 3; i++) await post('/api/session/start', { date: today, city: '深圳', scope: 'city', lat: 22.54 + i * 0.001, lng: 114.05 + i * 0.001 });
+  // 注意：必须带 lat/lng 才会被记为一次出发（第 2 节那次没带坐标，本来就不该计入）；
+  // 且每次要换个位置 —— 同一位置短时间内重复出发已按"重复起步"去重，不再新增序号。
+  for (let i = 0; i < 3; i++) await post('/api/session/start', { date: today, city: '深圳', scope: 'city', lat: 22.54 + i * 0.01, lng: 114.05 + i * 0.01 });
   const expS = await post('/api/archive/export', {});
-  for (let i = 0; i < 2; i++) await post('/api/session/start', { date: today, city: '深圳', scope: 'city', lat: 22.55 + i * 0.001, lng: 114.06 + i * 0.001 });
+  for (let i = 0; i < 2; i++) await post('/api/session/start', { date: today, city: '深圳', scope: 'city', lat: 22.57 + i * 0.01, lng: 114.08 + i * 0.01 });
   const impS = await post('/api/archive/import', { code: expS.code });
   const ss = await J('/api/sessions');
   const ns = (ss.starts || []).map((x) => x.n).sort((a, b) => a - b);
   ok('导入后出发记录被合并（不丢）', (ss.starts || []).length === 5, 'count=' + (ss.starts || []).length);
   ok('出发序号全局重排为 1..N', ns.join(',') === '1,2,3,4,5', ns.join(','));
-  const sn = await post('/api/session/start', { date: today, city: '深圳', scope: 'city', lat: 22.57, lng: 114.07 });
+  const sn = await post('/api/session/start', { date: today, city: '深圳', scope: 'city', lat: 22.59, lng: 114.12 });
   ok('下一次出发序号 = 总次数 + 1', sn.sessionNo === 6, 'sessionNo=' + sn.sessionNo);
 
   console.log('\n== 13. 重置传播：按时间戳过滤 + 接管 ==');
@@ -320,7 +322,7 @@ async function main() {
   const ss14 = await J('/api/sessions');
   const ns14 = (ss14.starts || []).map((x) => x.n).sort((a, b) => a - b);
   ok('14.5 出发序号合并后全局重排（连续且无重复）', ns14.length >= 2 && ns14[0] === 1 && ns14.every((v, i) => v === i + 1), ns14.join(','));
-  const sn14b = await post('/api/session/start', { date: today, city: '深圳', scope: 'city', lat: 22.61, lng: 114.11 });
+  const sn14b = await post('/api/session/start', { date: today, city: '深圳', scope: 'city', lat: 22.70, lng: 114.20 });
   ok('14.6 下一次出发序号 = 合并后总数 + 1', sn14b.sessionNo === ns14.length + 1, 'sessionNo=' + sn14b.sessionNo + ' total=' + ns14.length);
 
   console.log('\n== 16. 区域修复可撤销（覆写前留备份） ==');
@@ -378,6 +380,29 @@ async function main() {
   const rep18 = await post('/api/report/' + day18);
   ok('18.6 生成日报时自动校正（接口返回 stats 为全天口径）',
     rep18.ok === true && Number((rep18.stats || {}).distance) > 5000, 'distance=' + (rep18.stats || {}).distance);
+
+  console.log('\n== 19. 重复起步闸门（接口层） ==');
+  // 「第 13 次出发点」故障的源头：行进中重复点出发 → 引擎清零累计 → 结束上报几百米。
+  // 这里验证接口层确实把同一位置的重复出发挡住，并且极小段上报会被标记为"已忽略"。
+  const dupA = await post('/api/session/start', { date: today, city: '深圳', scope: 'city', lat: 24.10, lng: 115.10 });
+  const dupB = await post('/api/session/start', { date: today, city: '深圳', scope: 'city', lat: 24.10, lng: 115.10 });
+  ok('19.1 同位置连续两次出发只算一次（接口返回 reused）',
+    dupB.reused === true && dupB.sessionNo === dupA.sessionNo,
+    JSON.stringify({ a: dupA.sessionNo, b: dupB.sessionNo, reused: dupB.reused }));
+  const dupForce = await post('/api/session/start', { date: today, city: '深圳', scope: 'city', lat: 24.10, lng: 115.10, forceStart: true });
+  ok('19.2 forceStart=true 时允许显式新增一次出发',
+    dupForce.reused === false && dupForce.sessionNo === dupA.sessionNo + 1,
+    JSON.stringify({ n: dupForce.sessionNo }));
+
+  // 极小段上报被明确标记（前端据此给日志提示，不再让用户以为数据丢了）
+  const stBefore19 = await J('/api/stats?range=day');
+  const distBefore19 = Number(stBefore19.agg.totalDistance) || 0;
+  const endMin = await post('/api/session/end', { date: today, stats: { distance: 60, duration: 20000, totalKeys: 3, rolls: 0 } });
+  ok('19.3 极小段上报被标记为未采纳', endMin.statsAccepted === false, JSON.stringify(endMin).slice(0, 80));
+  const stAfter19 = await J('/api/stats?range=day');
+  ok('19.4 极小段上报没有把当天汇总打回小值',
+    Number(stAfter19.agg.totalDistance) >= distBefore19,
+    `${distBefore19} → ${stAfter19.agg.totalDistance}`);
 
   console.log('\n== 15. 每小时自动存档配置 ==');
   const cfg15 = await J('/api/config');

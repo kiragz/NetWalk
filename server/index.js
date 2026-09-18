@@ -11,7 +11,7 @@ const { WebSocketServer } = require('ws');
 
 const { NetMonitor } = require('./netmon');
 const { KeyMonitor } = require('./keymon');
-const { TrackStore, todayStr } = require('./store');
+const { TrackStore, todayStr, isMeaningfulStats, smallStatsGuardEnabled, getIgnoredSmallStats } = require('./store');
 const { AchievementStore } = require('./achievements');
 const { exportArchive, importArchive, decodeArchive, pickCarryConfig } = require('./archive');
 const mailbox = require('./mailbox');
@@ -479,6 +479,10 @@ app.get('/api/selfcheck', (req, res) => {
     account: activeAccount ? { name: activeAccount.name, email: activeAccount.email } : null,
     accountsTotal: accounts.list().length,
     originCustom: Boolean(config.originCustom),
+    // 本进程已忽略的「极小段上报」次数：正常应为 0；大于 0 说明发生过重复起步，
+    // 数据没被写坏（汇总按轨迹算），但值得看一眼日志里的 session start 去重记录。
+    ignoredSmallStats: getIgnoredSmallStats(),
+    smallStatsGuard: smallStatsGuardEnabled(),
     message: '把这一页截图发给开发者即可快速定位问题（不含任何明文密钥）',
   });
 });
@@ -842,8 +846,16 @@ app.post('/api/session/start', (req, res) => {  const body = req.body || {};
   store.setContext(date, { city: body.city, scope: body.scope });
   // 记录本次出发的起点 + 全局序号（主地图紫点显示「第 N 次出发」）
   let n = null;
+  let reused = false;
+  let reusedReason = '';
   if (Number.isFinite(body.lat) && Number.isFinite(body.lng)) {
-    try { n = store.addSessionStart(date, body.lat, body.lng); } catch (_) { /* 记录失败不影响出发 */ }
+    try {
+      const r = store.addSessionStart(date, body.lat, body.lng, { force: body.forceStart === true });
+      n = r.n;
+      reused = Boolean(r.reused);
+      reusedReason = r.reason || '';
+      if (reused) logLine(`session start 去重：${reusedReason} → 沿用第 ${n} 次`);
+    } catch (_) { /* 记录失败不影响出发 */ }
   }
   walkingNow = true;
   lastHourlyMailAt = Date.now();   // 每小时自动存档从出发时刻起算
@@ -862,7 +874,9 @@ app.post('/api/session/start', (req, res) => {  const body = req.body || {};
     cleared.push('freshStart');
   }
   if (cleared.length) saveConfig(config);
-  res.json({ ok: true, sessionNo: n, cleared });
+  // reused=true 表示这次不是真的新出发（重复提交 / 原地重复起步），前端据此提示用户，
+  // 并知道"引擎的累计没有被重置"这件事在数据层面已经挡住了。
+  res.json({ ok: true, sessionNo: n, reused, reusedReason, cleared });
 });
 
 /** 全部出发点（跨天），主地图/轨迹回看画紫点用 */
@@ -1038,7 +1052,17 @@ app.post('/api/session/end', async (req, res) => {
   const body = req.body || {};
   const date = body.date || todayStr();
   if (body.city || body.scope) store.setContext(date, { city: body.city, scope: body.scope });
+  const beforeDist = Number(store.load(date).stats && store.load(date).stats.distance) || 0;
   const data = store.finish(date, body.stats || null);
+  const afterDist = Number(data.stats && data.stats.distance) || 0;
+  // 上报为"空小段"（几秒钟的误触发出发）时说明它已被忽略 —— 观察日志能立刻分辨这是
+  // 故障还是正常的短行程，而不用去比对 path 点数和 stats。
+  const statsAccepted = isMeaningfulStats(body.stats);
+  if (body.stats && !statsAccepted) {
+    logLine(`session end: 引擎上报为极小段（${Math.round(Number(body.stats.distance) || 0)}m / ${Math.round((Number(body.stats.duration) || 0) / 1000)}s）已忽略，当日汇总保持 ${afterDist}m`);
+  } else if (beforeDist && afterDist > beforeDist) {
+    logLine(`session end: 当日里程 ${beforeDist} → ${afterDist}m`);
+  }
   // 结束后立即结算成就
   const agg = store.aggregate();
   const st = achStore.refresh(agg);
@@ -1066,7 +1090,7 @@ app.post('/api/session/end', async (req, res) => {
     logLine('结束漫游发信异常：' + (e && e.message ? e.message : e));
   }
   res.json({
-    ok: true, date, stats: data.stats, achievements: st,
+    ok: true, date, stats: data.stats, statsAccepted, achievements: st,
     mail,
     mailQueued: mailConfigured(config) && Boolean(archiveRecipient()) && config.autoMailArchive !== false,
   });

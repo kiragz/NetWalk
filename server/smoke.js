@@ -342,6 +342,58 @@ p.planRoute(from, { lat: far.lat, lng: far.lng }).then(async (route) => {
   const kept = sKeep.recomputeStats('2026-09-10');
   ok(Math.round(kept.distance) === 9999, '引擎上报的权威里程不被几何抖动改写', `${kept.distance}m`);
 
+  console.log('\n== 7.66 重复起步闸门（切断"小段覆盖"的源头） ==');
+  // 历史因果链：行进中重复起步 → 引擎为新出发把累计清零 → 结束时上报几百米 →
+  // 全天汇总被覆盖。上一节挡住了"覆盖"，本节从源头挡住"多出来的那次出发"。
+  const dirDedup = path.join(SMOKE_DIR, 'dedup');
+  rmBestEffort(dirDedup);
+  const sDd = new TrackStore(dirDedup);
+  const rA = sDd.addSessionStart('2026-09-24', 23.13, 113.35);
+  ok(rA.n === 1 && rA.reused === false, '首次出发记为第 1 次', JSON.stringify(rA));
+  const rB = sDd.addSessionStart('2026-09-24', 23.13, 113.35);
+  ok(rB.n === 1 && rB.reused === true, '同位置 10 秒内重复出发：沿用原序号、不新增', JSON.stringify(rB));
+  ok(sDd.get('2026-09-24').sessions.length === 1, '重复出发没有多出发记录', String(sDd.get('2026-09-24').sessions.length));
+
+  // 离开一段距离（>50m）→ 确实是一次新出发
+  const rC = sDd.addSessionStart('2026-09-24', 23.1400, 113.3600);
+  ok(rC.n === 2 && rC.reused === false, '走出 50m 以上后出发算新的一次', JSON.stringify(rC));
+
+  // 原地小范围挪动（<50m，超过 10 秒）→ 就地修正上次出发点，不新增
+  const last = sDd.get('2026-09-24').sessions[1];
+  last.t = Date.now() - 60000;                 // 让它落在 10s~3min 窗口内
+  sDd.markDirty('2026-09-24');
+  const rD = sDd.addSessionStart('2026-09-24', 23.1402, 113.3602);
+  ok(rD.n === 2 && rD.reused === true, '原地重复起步：就地修正上次出发点，不新增出发', JSON.stringify(rD));
+  const movedLast = sDd.get('2026-09-24').sessions[1];
+  ok(Math.abs(movedLast.lat - 23.1402) < 1e-6, '被修正的出发点已挪到当前位置', String(movedLast.lat));
+
+  // force=true（用户明确"从这里重新出发"）时不做去重
+  const rE = sDd.addSessionStart('2026-09-24', 23.1402, 113.3602, { force: true });
+  ok(rE.n === 3 && rE.reused === false, 'forceStart 时允许显式新增一次出发', JSON.stringify(rE));
+
+  console.log('\n== 7.67 同步时"空壳"不许压掉真实数据 ==');
+  // 另一台设备刚打开程序产生的空日期，不能把本机这一天真实的里程/时长覆盖成 0
+  const dirMerge = path.join(SMOKE_DIR, 'mergemeta');
+  rmBestEffort(dirMerge);
+  const sMg = new TrackStore(dirMerge);
+  let cur4 = { lat: 23.13, lng: 113.35 };
+  const mgPath = [];
+  for (let i = 0; i < 200; i++) {
+    cur4 = G.destPoint(cur4, (i * 47) % 360, 30);
+    mgPath.push({ t: t0 + i * 30000, lat: cur4.lat, lng: cur4.lng, road: '合并路', spd: 5, mode: 'walk', no: 1 });
+  }
+  sMg.appendPath('2026-09-11', mgPath);
+  sMg.finish('2026-09-11', { distance: 6000, duration: 2 * 3600 * 1000, totalKeys: 800, rolls: 6 });
+  const beforeMerge = sMg.get('2026-09-11').stats.distance;
+  // 对端同一天是"空壳"（没走过路）却带着一个更小的 stats
+  sMg.mergeDate('2026-09-11', {
+    date: '2026-09-11', startedAt: Date.now(), endedAt: null, city: '',
+    path: [], samples: [], rolls: [], sessions: [], stats: { distance: 5, duration: 3000 },
+  });
+  const afterMerge = sMg.get('2026-09-11').stats.distance;
+  ok(afterMerge >= beforeMerge, '空壳同期数据不会把真实里程压小', `${beforeMerge} → ${afterMerge}`);
+  ok(sMg.get('2026-09-11').path.length === 200, '合并后轨迹点未丢', String(sMg.get('2026-09-11').path.length));
+
   console.log('\n== 7.7 今日路过：路名清单（不调用高德） ==');
   const dirRoad = path.join(SMOKE_DIR, 'roads');
   rmBestEffort(dirRoad);

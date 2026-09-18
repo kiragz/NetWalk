@@ -696,6 +696,8 @@
       exportRoadsXls,
       startPlaceCollector,
       stopPlaceCollector,
+      startWalk,          // 出发（含防连点闸门）：测试重复起步防护用
+      endWalk,
       findLastPosition,
       showMapBanner,
       hideMapBanner,
@@ -1112,6 +1114,16 @@
 
   async function startWalk() {
     if (!state.provider) return;
+    // 防连点：出发要走"同步→取位→规划"好几百毫秒，期间按钮还没 disable，
+    // 连点两次会提交两次 session/start，凭空多出一次出发（历史上导致过
+    // "引擎累计被重置 → 结束上报几百米 → 全天汇总被覆盖"）。
+    if (state.starting) return;
+    state.starting = true;
+    try { await startWalkInner(); } finally { state.starting = false; }
+  }
+
+  async function startWalkInner() {
+    if (!state.provider) return;
     // 断网时禁止出发（防循环：出发→断网→自动结束→再出发）
     if (navigator.onLine === false) { log('⚠ 当前无网络，无法规划路线。请联网后再出发'); return; }
 
@@ -1158,6 +1170,9 @@
         body: JSON.stringify({ date: today(), city: state.cfg.city, scope: state.cfg.scope, lat: origin.lat, lng: origin.lng }),
       }).then((r) => r.json());
       if (sj && sj.sessionNo) sessionNo = sj.sessionNo;
+      // 服务端判定这次是重复出发（原地重复起步 / 重复提交）→ 直接沿用原序号，
+      // 不新增出发次数。不提示的话用户会以为"怎么第 13 次还在这儿"。
+      if (sj && sj.reused) log(`ℹ ${sj.reusedReason || '本次未新增出发次数'}（仍记为第 ${sessionNo} 次出发）`);
     } catch (_) { /* 离线时忽略 */ }
     // 先画历史轨迹（setTrack 会清掉旧的出发点标记），再补本次出发的紫点，顺序不能反
     drawHistoryOnMap(origin);
@@ -2548,6 +2563,11 @@
       // 服务端会把本次 stats 与全天轨迹合并再回传：当天走过很久、或行进中重复起步时，
       // 引擎的本次小计（可能只有几百米）不能当成全天成绩展示，否则看着像"前面的轨迹没了"。
       if (endRes && endRes.stats) stats = endRes.stats;
+      // 上报被判定为"极小段"（几秒钟的误触发出发）时明确说一句，避免用户
+      // 看到面板数字与预期不同就以为数据丢了。
+      if (endRes && endRes.statsAccepted === false) {
+        log('ℹ 本次上报的里程过小（疑似重复起步产生的空段），已忽略 —— 全天成绩按原始轨迹计算，未受影响');
+      }
     } catch (err) {
       log('结束上报失败：' + (err && err.message ? err.message : err));
     }
