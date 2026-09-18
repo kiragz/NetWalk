@@ -76,6 +76,91 @@ function cellKey(lat, lng) {
   return `${Math.round(lat / CELL_DEG)},${Math.round(lng / CELL_DEG)}`;
 }
 
+/**
+ * 从一天的原始数据（path / samples）重算里程与时长 —— 汇总字段的**唯一权威口径**。
+ *
+ * 存在的理由（踩过的坑）：stats 曾被「结束漫游」用引擎内存里的即时累计值整体覆盖，
+ * 于是「第 N 次出发进行中又开了一次出发」时，全天汇总会被那几秒钟的小段覆盖，
+ * 日报变成「0.05km / 69 步 / 43s」，看起来像前面几个小时的轨迹全没了
+ * （实际 path/samples 一个点都没丢，只是汇总字段被改写）。
+ *
+ * 里程优先级与 aggregate() 保持一致：
+ *   ① samples 里上报的累计真实里程（引擎自己算的真实位移）
+ *   ② path 的几何长度（地图位移，兜底）
+ *   ③ 已有的 stats.distance —— 只要它不"明显失真"就尊重它
+ *
+ * 「明显失真」的判定很关键：只有当几何量比旧值大到 **1.5 倍以上**（远超坐标抖动幅度，
+ * 说明旧值确实是被一小段覆盖了）才推翻旧值；否则保留引擎上报的权威值，
+ * 免得把「地图尺度放大坐标位移」多算出来的几百米当成真实里程灌进去。
+ */
+function recomputeDayStats(data) {
+  const path = data.path || [];
+  const samples = data.samples || [];
+  let geomDist = 0;
+  for (let i = 1; i < path.length; i++) {
+    const a = path[i - 1];
+    const b = path[i];
+    if (!a || !b) continue;
+    const seg = haversine(a, b);
+    // 断点（换会话/定位跳变）不计入几何长度，否则会凭空多出几公里的"飞线"
+    if (Number.isFinite(seg) && seg <= 300) geomDist += seg;
+  }
+  let sampleDist = 0;
+  for (const s of samples) {
+    const v = Number(s && s.dist);
+    if (Number.isFinite(v) && v > sampleDist) sampleDist = v;
+  }
+  const oldDist = Number(data.stats && data.stats.distance) || 0;
+  const measured = Math.max(sampleDist, geomDist);
+  // 旧值明显小于实测值（< 2/3）→ 判定为被小段覆盖，用实测值修回；
+  // 否则以旧值为准（引擎上报的真实里程比几何推算可靠，不因抖动改写）
+  const dist = (oldDist > 0 && measured < oldDist * 1.5) ? oldDist : measured;
+
+  // 时长：优先按 samples 首尾推算（覆盖全天），其次 path 首尾
+  let first = 0;
+  let last = 0;
+  for (const s of samples) {
+    const t = Number(s && s.t) || 0;
+    if (!first || (t && t < first)) first = t;
+    if (t > last) last = t;
+  }
+  if (!first || !last) {
+    for (const p of path) {
+      const t = Number(p && p.t) || 0;
+      if (!first || (t && t < first)) first = t;
+      if (t > last) last = t;
+    }
+  }
+  const spanDur = first && last ? Math.max(0, last - first) : 0;
+  const oldDur = Number(data.stats && data.stats.duration) || 0;
+  // 同上：旧时长明显短于实测跨度（< 2/3）才修正，否则保留引擎值
+  const duration = (oldDur > 0 && spanDur < oldDur * 1.5) ? oldDur : Math.max(spanDur, oldDur);
+
+  // 速度：从 path 的 spd 取，缺就按 里程/时长 估
+  let maxSpeed = 0;
+  for (const p of path) {
+    const v = Number(p && p.spd) || 0;
+    if (v > maxSpeed) maxSpeed = v;
+  }
+  const prev = (data.stats && typeof data.stats === 'object') ? data.stats : {};
+  const prevAvg = Number(prev.avgSpeed) || 0;
+  let avgSpeed = duration > 0 ? (dist / 1000) / (duration / 3600000) : 0;
+  // 引擎上报的均速更贴近真实（它按速度档累计），只在明显失真时改用推算值
+  if (prevAvg > 0 && Math.abs(avgSpeed - prevAvg) < prevAvg * 0.5) avgSpeed = prevAvg;
+
+  return {
+    ...prev,
+    distance: Math.round(dist),
+    duration: Math.round(duration),
+    avgSpeed: Number(avgSpeed.toFixed(2)),
+    maxSpeed: Number((maxSpeed || avgSpeed || prevAvg || 0).toFixed(2)),
+    // 跑步/走路时长与网络量只在旧值更大时保留（引擎结束时会给出准值）
+    runMs: Math.max(Number(prev.runMs) || 0, 0),
+    walkMs: Math.max(Number(prev.walkMs) || 0, 0),
+    rolls: Math.max(Number(prev.rolls) || 0, (data.rolls || []).length),
+  };
+}
+
 /** 从最后一天往前数连续活跃天数 */
 function streak(dates) {
   if (!dates.length) return 0;
@@ -427,21 +512,9 @@ class TrackStore {
         const m = mapping.get(Number(s.n));
         if (m && m !== Number(s.n)) { s.n = m; changed = true; }
       }
-      // ④ 当天统计按剩余数据重算（里程取采样里累计 dist 的最大值）
+      // ④ 当天统计按剩余数据重算：统一走 recomputeDayStats（不再只取 samples 的 dist 最大值）
       if (changed) {
-        let dist = 0;
-        let first = 0;
-        let last = 0;
-        for (const s of data.samples || []) {
-          if (Number(s.dist) > dist) dist = Number(s.dist);
-          const t = Number(s.t) || 0;
-          if (!first || t < first) first = t;
-          if (t > last) last = t;
-        }
-        if (data.stats && typeof data.stats === 'object') {
-          data.stats.distance = data.path.length ? dist : 0;
-          data.stats.duration = (last && first) ? Math.max(0, last - first) : 0;
-        }
+        data.stats = recomputeDayStats(data);
         this.markDirty(d);
         touched++;
       }
@@ -741,14 +814,51 @@ class TrackStore {
     return data.path.length;
   }
 
-  /** 结束当天漫游，写入汇总统计 */
+  /**
+   * 结束当天漫游，写入汇总统计。
+   *
+   * ⚠ 这里**不能**直接 `data.stats = stats`（踩过的坑）：stats 是引擎内存里的
+   * 即时累计值，只覆盖"本次出发"这一小段。若当天已经走过很久（或者用户在第 N 次
+   * 行进中又开了一次出发），直接覆盖会把全天汇总抹成几秒钟的小值 ——
+   * 日报变成「0.05km / 69 步 / 43s」，让人以为前面几小时的轨迹全丢了。
+   *
+   * 现在的口径：① 传入的 stats 只用于**补全新数据**（更大的值才采纳）
+   *            ② 里程/时长再按 path + samples 全量重算一次，取较大者兜底
+   */
   finish(date, stats) {
     const data = this.load(date);
     data.endedAt = Date.now();
-    data.stats = stats || null;
+    if (stats && typeof stats === 'object') {
+      const prev = (data.stats && typeof data.stats === 'object') ? data.stats : {};
+      const merged = { ...prev };
+      for (const [k, v] of Object.entries(stats)) {
+        if (v === null || v === undefined) continue;
+        if (typeof v === 'string' || typeof v === 'boolean') { merged[k] = v; continue; }
+        const nv = Number(v);
+        if (!Number.isFinite(nv)) continue;
+        const pv = Number(merged[k]);
+        // 数值字段取较大者：既避免「小段覆盖大段」，也保留引擎上报的准值
+        merged[k] = Number.isFinite(pv) ? Math.max(pv, nv) : nv;
+      }
+      data.stats = merged;
+    } else if (!data.stats) {
+      data.stats = null;
+    }
+    // 兜底：若合并后的里程/时长仍明显小于原始轨迹能支撑的量（说明旧 stats 本就被小段覆盖过），
+    // 这里会按 path/samples 把它修正回来 —— 修不动就原样保留引擎值。
+    data.stats = recomputeDayStats(data);
     this.markDirty(date);
     this.flush();
     return data;
+  }
+
+  /** 按当日原始数据（path/samples）重算汇总统计并落盘；返回重算后的 stats */
+  recomputeStats(date) {
+    const data = this.load(date);
+    data.stats = recomputeDayStats(data);
+    this.markDirty(date);
+    this.flush();
+    return data.stats;
   }
 
   isFinished(date) {

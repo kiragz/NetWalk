@@ -341,6 +341,44 @@ async function main() {
   const undo16b = await post('/api/track/restore-backup', { date: today });
   ok('16.4 无备份时撤销给出提示', undo16b.ok === false && !!undo16b.error, JSON.stringify(undo16b).slice(0, 80));
 
+  console.log('\n== 18. 汇总统计重算（修「日报只剩几百米」） ==');
+  // 造一段全天轨迹 + 用「一小段」的 stats 结束漫游（模拟行进中重复起步被覆盖）
+  const day18 = today;
+  for (let i = 0; i < 3; i++) {
+    await post('/api/session/start', { date: day18, city: '深圳', scope: 'city', lat: 23.30 + i * 0.001, lng: 113.45 });
+  }
+  const pts18 = [];
+  // 直接算坐标（每点约 40m 向东偏北，累计约 9.6km），不依赖 Geo 模块
+  for (let i = 0; i < 240; i++) {
+    pts18.push({
+      t: Date.now() - (240 - i) * 30000,
+      lat: 23.30 + i * 0.00012 + (i % 5) * 0.00004,
+      lng: 113.45 + i * 0.00032,
+      road: '重算路' + (i % 4), spd: 5, mode: 'walk', no: i < 200 ? 1 : 2,
+    });
+  }
+  await post('/api/track/path', { date: day18, points: pts18 });
+  // 关键：只上报"一小段"的 stats（模拟被小段覆盖）
+  const end18 = await post('/api/session/end', { date: day18, stats: { distance: 200, duration: 30000, totalKeys: 5, rolls: 1 } });
+  ok('18.1 结束漫游返回的 stats 已是全天口径（不被小段覆盖）', Number(end18.stats && end18.stats.distance) > 5000,
+    'distance=' + (end18.stats && end18.stats.distance));
+  const re18 = await post('/api/stats/recompute', { date: day18 });
+  ok('18.2 重算接口成功返回', re18.ok === true, JSON.stringify(re18).slice(0, 80));
+  ok('18.3 重算后里程与原始轨迹一致（>5km）', Number((re18.stats || {}).distance) > 5000, 'distance=' + (re18.stats || {}).distance);
+  const rng18 = await J('/api/track/range?from=' + day18 + '&to=' + day18);
+  const ptsNow18 = ((rng18.days || [])[0] || { path: [] }).path || [];
+  const re18b = await post('/api/stats/recompute', { date: day18 });
+  const rng18b = await J('/api/track/range?from=' + day18 + '&to=' + day18);
+  const ptsAfter18 = ((rng18b.days || [])[0] || { path: [] }).path || [];
+  ok('18.4 重算不动轨迹点（点数前后一致）', ptsAfter18.length === ptsNow18.length && ptsNow18.length > 200,
+    `before=${ptsNow18.length} after=${ptsAfter18.length} fwd=${JSON.stringify((re18b.days || [])[0] || {}).slice(0, 60)}`);
+  const reAll18 = await post('/api/stats/recompute', {});
+  ok('18.5 不传日期时重算全部日期', reAll18.ok === true && Array.isArray(reAll18.days) && reAll18.days.length >= 1,
+    'days=' + ((reAll18.days || []).length));
+  const rep18 = await post('/api/report/' + day18);
+  ok('18.6 生成日报时自动校正（接口返回 stats 为全天口径）',
+    rep18.ok === true && Number((rep18.stats || {}).distance) > 5000, 'distance=' + (rep18.stats || {}).distance);
+
   console.log('\n== 15. 每小时自动存档配置 ==');
   const cfg15 = await J('/api/config');
   ok('15.1 hourlyMailArchive 默认开启', cfg15.hourlyMailArchive !== false, 'value=' + cfg15.hourlyMailArchive);

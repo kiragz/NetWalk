@@ -289,6 +289,59 @@ p.planRoute(from, { lat: far.lat, lng: far.lng }).then(async (route) => {
   pr.clearAll();
   ok(pr.scanCount('2026-09-15') === 0, '清空收集册时搜索记录一并清空');
 
+  console.log('\n== 7.65 汇总统计不被「小段出发」覆盖（历史故障回归） ==');
+  // 故障场景：全天走了很久，用户在行进中又开了一次出发（重复起步 / 设置继续点），
+  // 结束时引擎只上报那一小段的 stats，旧代码直接 data.stats = stats → 全天汇总被打回小值，
+  // 表现成「日报只剩几百米，看着像前面的轨迹全没了」。
+  const dirStats = path.join(SMOKE_DIR, 'statsfix');
+  const sStats = new TrackStore(dirStats);
+  const t0 = Date.now() - 8 * 3600 * 1000;           // 8 小时前出发
+  const longPath = [];
+  let cur2 = { lat: 23.13, lng: 113.35 };
+  for (let i = 0; i < 600; i++) {                    // 600 点 × ~30m ≈ 18km
+    cur2 = G.destPoint(cur2, (i * 53) % 360, 30);
+    longPath.push({ t: t0 + i * 40000, lat: cur2.lat, lng: cur2.lng, road: `长路${i % 5}`, spd: 5 + (i % 4), mode: 'walk', no: i < 500 ? 1 : 2 });
+  }
+  sStats.appendPath('2026-09-10', longPath);
+  sStats.addSessionStart('2026-09-10', 23.13, 113.35);
+  // 全天结束时引擎上报的是「一直走」的权威汇总
+  sStats.finish('2026-09-10', { distance: 18000, duration: 8 * 3600 * 1000, totalKeys: 5000, rolls: 20 });
+  const goodStats = sStats.get('2026-09-10').stats;
+  ok(Math.round(goodStats.distance) === 18000, '正常结束：全天汇总=引擎上报值', goodStats.distance);
+
+  // 旧数据被小段覆盖后的样子：distance 只剩刚起步那点
+  sStats.get('2026-09-10').stats.distance = 320;
+  sStats.get('2026-09-10').stats.duration = 41000;
+  sStats.markDirty('2026-09-10');
+  sStats.flush();
+  const fixed = sStats.recomputeStats('2026-09-10');
+  ok(fixed.distance > 15000, '被小段覆盖的里程能按原始轨迹修回来', `${fixed.distance}m`);
+  ok(fixed.duration > 4 * 3600 * 1000, '被截断的时长能修回来', `${(fixed.duration / 3600000).toFixed(1)}h`);
+  ok(fixed.rolls === 20, '路口次数取 stats 与 rolls 记录的较大者', String(fixed.rolls));
+  ok(sStats.get('2026-09-10').path.length === 600, '重算不动轨迹点', String(sStats.get('2026-09-10').path.length));
+  // 幂等：重算两次结果一致
+  const again = sStats.recomputeStats('2026-09-10');
+  ok(Math.round(again.distance) === Math.round(fixed.distance), '重算是幂等的', `${again.distance}`);
+
+  // 不会再被"小段 stats"打回去：小值进 finish 也不会把大值覆盖掉
+  sStats.finish('2026-09-10', { distance: 320, duration: 41000 });
+  const afterSmall = sStats.get('2026-09-10').stats;
+  ok(afterSmall.distance > 15000, '结束时上报小段 stats 不会覆盖全天汇总（本次修复的核心）', `${afterSmall.distance}m`);
+
+  // 引擎上报的权威值仍被尊重：几何量没明显超出的情况不擅自改写
+  const dirKeep = path.join(SMOKE_DIR, 'statkeep');
+  const sKeep = new TrackStore(dirKeep);
+  let cur3 = { lat: 23.13, lng: 113.35 };
+  const shortPath = [];
+  for (let i = 0; i < 100; i++) {
+    cur3 = G.destPoint(cur3, (i * 31) % 360, 25);
+    shortPath.push({ t: t0 + i * 6000, lat: cur3.lat, lng: cur3.lng, road: '短路', spd: 4, mode: 'walk' });
+  }
+  sKeep.appendPath('2026-09-10', shortPath);
+  sKeep.finish('2026-09-10', { distance: 9999, duration: 600000 });
+  const kept = sKeep.recomputeStats('2026-09-10');
+  ok(Math.round(kept.distance) === 9999, '引擎上报的权威里程不被几何抖动改写', `${kept.distance}m`);
+
   console.log('\n== 7.7 今日路过：路名清单（不调用高德） ==');
   const dirRoad = path.join(SMOKE_DIR, 'roads');
   rmBestEffort(dirRoad);

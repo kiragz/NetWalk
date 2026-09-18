@@ -803,6 +803,40 @@ app.post('/api/track/restore-backup', (req, res) => {
   }
 });
 
+/**
+ * 按当日原始轨迹重算汇总统计（里程 / 时长 / 均速 / 路口次数）。
+ *
+ * 用途：修掉历史数据的「stats 被小段覆盖」问题 —— 曾经「结束漫游」会把引擎内存里
+ * 本次出发的累计值整体写入 stats，若当天已经走过很久（或在行进中又开了一次出发），
+ * 日报就会显示成几秒钟的小值，看起来像当天前面的轨迹全消失了（其实 path 一个点没丢）。
+ * 不传 date 则重算**所有日期**。
+ */
+app.post('/api/stats/recompute', (req, res) => {
+  const body = req.body || {};
+  try {
+    if (body.date) {
+      const date = String(body.date).slice(0, 10);
+      if (!/^\d{4}-\d{2}-\d{2}$/.test(date)) return res.status(400).json({ ok: false, error: '日期格式应为 YYYY-MM-DD' });
+      const before = store.get(date).stats || {};
+      const after = store.recomputeStats(date);
+      logLine(`stats recompute: ${date} ${Math.round(before.distance || 0)}m -> ${after.distance}m`);
+      return res.json({ ok: true, days: [{ date, before: before.distance || 0, after: after.distance }], stats: after });
+    }
+    const days = [];
+    for (const date of store.listDates()) {
+      const data = store.get(date);
+      if (!data || !(data.path || []).length) continue;
+      const before = data.stats || {};
+      const after = store.recomputeStats(date);
+      days.push({ date, before: Math.round(before.distance || 0), after: after.distance });
+    }
+    logLine('stats recompute: all dates = ' + days.length);
+    res.json({ ok: true, days });
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e && e.message ? e.message : String(e) });
+  }
+});
+
 app.post('/api/session/start', (req, res) => {  const body = req.body || {};
   const date = body.date || todayStr();
   store.setContext(date, { city: body.city, scope: body.scope });
@@ -1457,12 +1491,15 @@ app.post('/api/report/:date', (req, res) => {
   if (!data || data.path.length === 0) {
     return res.status(400).json({ ok: false, error: '当天没有轨迹数据' });
   }
+  // 出报告前先按原始轨迹校正汇总：历史数据可能被「结束漫游」用小段 stats 覆盖过
+  // （表现为「一天的轨迹只剩几百米」），这里静默修一次，保证报表口径与轨迹一致。
+  try { store.recomputeStats(date); } catch (_) { /* 修不了就按原样出 */ }
   const html = buildReportHtml(data, config);
   const outDir = path.join(ACTIVE_DATA, 'reports');
   fs.mkdirSync(outDir, { recursive: true });
   const outFile = path.join(outDir, `netwalk-${date}.html`);
   fs.writeFileSync(outFile, html, 'utf8');
-  res.json({ ok: true, url: `/reports/netwalk-${date}.html`, file: outFile });
+  res.json({ ok: true, url: `/reports/netwalk-${date}.html`, file: outFile, stats: data.stats });
 });
 
 app.use('/reports', express.static(path.join(ACTIVE_DATA, 'reports')));

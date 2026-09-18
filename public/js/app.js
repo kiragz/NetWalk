@@ -72,6 +72,7 @@
     maskAch: $('maskAch'), achBody: $('achBody'), btnAchClose: $('btnAchClose'),
     maskStats: $('maskStats'), statsTabs: $('statsTabs'), statsGrid: $('statsGrid'),
     statsDaily: $('statsDaily'), btnStatsClose: $('btnStatsClose'),
+    btnStatsFix: $('btnStatsFix'),
     maskArchive: $('maskArchive'), arCode: $('arCode'), arInput: $('arInput'), arHint: $('arHint'),
     btnArGen: $('btnArGen'), btnArCopy: $('btnArCopy'), btnArImport: $('btnArImport'), btnArClose: $('btnArClose'),
     btnArApplyCfg: $('btnArApplyCfg'),
@@ -1539,6 +1540,42 @@
       });
     }
     if (el.btnRepairCancel) el.btnRepairCancel.addEventListener('click', () => { exitPickMode(); log('已取消区域修复'); });
+    // 🧮 重算统计：把「汇总被一小段覆盖」的日期按原始轨迹修回来（历史遗留问题兜底入口）
+    if (el.btnStatsFix) {
+      el.btnStatsFix.addEventListener('click', async () => {
+        const ok = window.confirm(
+          '按原始轨迹重新计算每天的里程 / 时长 / 路口次数。\n\n'
+          + '轨迹点本身不会改动，只修正汇总数字（不影响地图上的线）。\n'
+          + '用于修掉「日报只剩几百米、看着像前面的轨迹没了」的情况。\n\n'
+          + '是否继续？',
+        );
+        if (!ok) return;
+        el.btnStatsFix.disabled = true;
+        const old = el.btnStatsFix.textContent;
+        el.btnStatsFix.textContent = '重算中…';
+        try {
+          const r = await fetch('/api/stats/recompute', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+          }).then((x) => x.json());
+          const days = (r && r.days) || [];
+          const fixed = days.filter((d) => Math.round(d.after) !== Math.round(d.before));
+          if (fixed.length) {
+            log(`🧮 已重算 ${days.length} 天，修正 ${fixed.length} 天：`
+              + fixed.slice(0, 5).map((d) => `${d.date} ${(d.before / 1000).toFixed(2)}→${(d.after / 1000).toFixed(2)}km`).join('、'));
+          } else if (days.length) {
+            log(`🧮 已重算 ${days.length} 天，数据本来就一致，无需修正`);
+          } else {
+            log('🧮 没有可重算的日期（还没有轨迹数据）');
+          }
+          await renderStats(state.statsRange || 'day');
+        } catch (e) {
+          log('重算失败：' + (e && e.message ? e.message : e));
+        } finally {
+          el.btnStatsFix.disabled = false;
+          el.btnStatsFix.textContent = old;
+        }
+      });
+    }
     if (el.btnRepairGo) {
       el.btnRepairGo.addEventListener('click', async () => {
         const b = pickState && pickState.bounds;
@@ -2508,6 +2545,9 @@
         if (state.lastMail.ok) log(`📬 结束漫游：存档码已自动发送到 ${state.lastMail.to}（含本机配置）`);
         else log(`⚠ 结束漫游：存档邮件未自动发出 —— ${state.lastMail.error || '未知原因'}`);
       }
+      // 服务端会把本次 stats 与全天轨迹合并再回传：当天走过很久、或行进中重复起步时，
+      // 引擎的本次小计（可能只有几百米）不能当成全天成绩展示，否则看着像"前面的轨迹没了"。
+      if (endRes && endRes.stats) stats = endRes.stats;
     } catch (err) {
       log('结束上报失败：' + (err && err.message ? err.message : err));
     }
