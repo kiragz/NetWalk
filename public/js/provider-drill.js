@@ -238,6 +238,10 @@
 
     restoreDays() { return 0; }
 
+    hasPending() { return false; }
+
+    setViewportCulling() { /* 演练模式无需视口裁剪 */ }
+
     cullOutsideViewport() { return { culled: 0 }; }
 
     runStats() { return { onMap: 0, unloadedPending: 0, capUnloaded: 0, neverDropped: true }; }

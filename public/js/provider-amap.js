@@ -265,6 +265,7 @@
       this._droppedStatic = 0;      // 因安全网卸载的笔迹数（非删除，可回填）
       this._dayOfRun = [];          // 与 _runs 对齐的日期
       this._runTolKm = 0.10;        // 默认换色抽稀 100m（A 方案，把笔迹数压一个数量级）
+      this._cullEnabled = false;    // 视口裁剪默认关闭：安全优先，绝不因平移而"少画"轨迹
 
       this._avatarEl = buildAvatar();
       this._arrowEl = this._avatarEl.querySelector('.nw-avatar-arrow');
@@ -351,15 +352,32 @@
      * 卸载一笔（从地图上移除，但把它的来源记进 _unloaded 以便回填）。
      * ⚠ 与旧实现的本质区别：旧代码 splice 掉就再也回不来了（不可逆）；
      * 这里是**可逆卸载** —— 只要用户再看回那个区域/那一天，笔迹会重新画出来。
+     *
+     * ⚠ 关键：必须把**这一笔的实际点列**存进 _unloaded，否则回填时无点可画。
+     * 早先版本存的是 meta.pts（恒为 null），只能靠 _segCache 整日重画 —— 而重画
+     * 会与"该天仍有笔迹在图上"的判定冲突，导致部分卸载的笔迹永远回不来。
      */
     _unloadRun(i, reason) {
       const line = this._runs[i];
       const meta = this._runMeta[i];
+      // 先取出这一笔的点列（卸载前取，卸载后就拿不到了）
+      let pts = null;
+      if (meta && meta.pts) pts = meta.pts;
+      else if (line && typeof line.getPath === 'function') {
+        try {
+          pts = (line.getPath() || []).map((p) => ({
+            lat: p.lat !== undefined ? p.lat : (p.getLat && p.getLat()),
+            lng: p.lng !== undefined ? p.lng : (p.getLng && p.getLng()),
+            spd: (p.spd !== undefined ? p.spd : undefined),
+          }));
+        } catch (_) { pts = null; }
+      }
       if (line) { try { this.map.remove(line); } catch (_) { /* noop */ } }
       if (meta) {
         const key = meta.day || '未知日期';
         if (!this._unloaded.has(key)) this._unloaded.set(key, []);
-        this._unloaded.get(key).push(meta.pts || null);
+        // 存 {pts, colorIdx}：回填时按原颜色重画这一笔（而不是整日重画）
+        this._unloaded.get(key).push({ pts, color: meta.color, anchor: meta.anchor });
         meta.unloaded = reason;
       }
       this._runs.splice(i, 1);
@@ -433,6 +451,14 @@
               const m0 = cand.__nwAnchor || { lat: prev.lat, lng: prev.lng };
               if (this._distKm(m0, { lat, lng }) > this._runTolKm) continue;
               cand.setPath(p2.concat(seg));
+              // 同步被复用笔迹的点列
+              const ci = this._runs.indexOf(cand);
+              if (ci >= 0 && this._runMeta[ci]) {
+                const m = this._runMeta[ci];
+                if (!m.pts) m.pts = [];
+                m.pts.push({ lat, lng });
+                if (!m.day) m.day = day || null;
+              }
               this._lastSpd = spd;
               this._trackPts.push(cur);
               if (this._trackPts.length > 5000) this._trackPts = this._trackPts.slice(-4000);
@@ -451,12 +477,24 @@
           line.__nwAnchor = { lat, lng };   // 抽稀锚点
           this.map.add(line);
           this._runs.push(line);
-          this._runMeta.push({ line, anchor: { lat, lng }, t: Date.now(), pts: null });
+          // pts 记录这一笔的点列（卸载时用它精确回填）；color 记录档位（回填时还原颜色）
+          this._runMeta.push({
+            line, anchor: { lat, lng }, t: Date.now(),
+            pts: [{ lat: prev.lat, lng: prev.lng }, { lat, lng }],
+            day: day || null, color: li,
+          });
           this._curRun[li] = line;
           // ② 安全网：正常分层后碰不到；真触发也只做"可回填卸载"，不丢轨迹。
           this._enforceCap(this.map.getCenter && this.map.getCenter());
         } else {
           line.setPath(line.getPath().concat(seg));
+          // 同步更新该笔的点列（回填时要用）
+          const mi = this._runs.indexOf(line);
+          if (mi >= 0 && this._runMeta[mi]) {
+            const m = this._runMeta[mi];
+            if (!m.pts) m.pts = [];
+            m.pts.push({ lat, lng });
+          }
         }
       }
       this._lastSpd = spd;
@@ -548,20 +586,46 @@
     restoreAll(segCache) {
       if (!this._ready) return { restored: 0 };
       if (this._isMap(segCache)) this._segCache = segCache;
-      const pending = Array.from(this._unloaded.keys());   // 先快照：回填过程中 _unloaded 会变动
       this._activeDays = null;
+      // ⚠ 逐笔回填：_unloaded 里存的是**单条笔迹**（不是整天），
+      // 所以只要把每一条重新画回去即可 —— 不做"该天是否已有笔迹"的整日跳过判断，
+      // 那个判断会把"同一天里被卸载了一部分"的笔迹永久留在 _unloaded 里回不来。
       let restored = 0;
-      for (const day of pending) {
-        const segs = this._segCache && this._segCache.get ? this._segCache.get(day) : null;
-        if (!segs || !segs.length) continue;
-        // 该天已经有笔迹在图上就跳过（避免重复画）
-        const has = this._runMeta.some((m) => m && m.day === day);
-        if (has) { this._unloaded.delete(day); continue; }
-        this._replayDay(day, segs);
+      for (const day of Array.from(this._unloaded.keys())) {
+        const items = this._unloaded.get(day) || [];
+        for (const it of items) restored += this._restoreRun(it, day);
         this._unloaded.delete(day);
-        restored++;
       }
       return { restored };
+    }
+
+    /**
+     * 把**一条**卸载过的笔迹重新画回地图。
+     * 优先用卸载时保存的点列（精确还原，不会重画整天、不会重复）；
+     * 没有点列时（极老版本遗留的 null 记录）退化为整日回填一次。
+     */
+    _restoreRun(item, day) {
+      if (!item) return 0;
+      const pts = item.pts;
+      if (!pts || pts.length < 2) return 0;
+      const colorIdx = Number.isFinite(item.color) ? item.color : 0;
+      const color = this._speedColors[Math.min(colorIdx, this._speedColors.length - 1)];
+      try {
+        const line = new this.AMap.Polyline({
+          path: pts.map((p) => new this.AMap.LngLat(p.lng, p.lat)),
+          strokeColor: color,
+          strokeWeight: 4,
+          strokeOpacity: 0.9,
+          lineJoin: 'round',
+          lineCap: 'round',
+        });
+        line.__nwAnchor = item.anchor || { lat: pts[0].lat, lng: pts[0].lng };
+        this.map.add(line);
+        this._runs.push(line);
+        this._runMeta.push({ line, anchor: line.__nwAnchor, t: 0, pts, day, color: colorIdx });
+        this._dayOfRun.push(day);
+        return 1;
+      } catch (_) { return 0; }
     }
 
     /**
@@ -579,20 +643,16 @@
       return n;
     }
 
-    /** 补画某些天（用于日期切换 / 视口回填） */
+    /** 补画某些天（用于日期切换 / 视口回填）—— 逐笔精确还原 */
     restoreDays(days, segCache) {
       if (!this._ready) return 0;
       if (this._isMap(segCache)) this._segCache = segCache;
       let n = 0;
       for (const day of days) {
-        const segs = this._segCache && this._segCache.get ? this._segCache.get(day) : null;
-        if (!segs || !segs.length) continue;
-        // 该天已经有笔迹在图上就跳过
-        const has = this._runMeta.some((m) => m && m.day === day);
-        if (has) continue;
-        this._replayDay(day, segs);
+        const items = this._unloaded.get(day);
+        if (!items || !items.length) continue;
+        for (const it of items) n += this._restoreRun(it, day);
         this._unloaded.delete(day);
-        n++;
       }
       return n;
     }
@@ -601,13 +661,19 @@
      * 【C 方案】视口裁剪：把"已经在图上、但完全离开当前可视范围"的笔迹卸载掉。
      * 注意这是**可逆**的 —— 平移回来时由 restoreDays / restoreAll 补画。
      * 只卸载"整条笔迹的所有点都在视口外"的，避免把穿过视口的线切碎。
+     *
+     * ⚠ 默认**不在每次平移/缩放时自动触发**（由调用方显式决定）。
+     * 过早/过频的裁剪是"轨迹看起来变少"的元凶：用户拖着地图看一圈，
+     * 视野外的笔迹全被卸下，若不回填就再也看不到了。安全优先于省内存。
      */
     cullOutsideViewport(marginRatio = 0.25) {
       if (!this._ready) return { culled: 0 };
+      if (!this._cullEnabled) return { culled: 0, skipped: 'disabled' };
       let b = null;
       try { b = this.map.getBounds(); } catch (_) { return { culled: 0 }; }
       if (!b) return { culled: 0 };
       const sw = b.getSouthWest(), ne = b.getNorthEast();
+      // 边距给得宽松一些（默认 25% → 视口外扩），减少"刚划出视野就被卸"的抖动
       const dLat = (ne.lat - sw.lat) * marginRatio, dLng = (ne.lng - sw.lng) * marginRatio;
       const minLat = sw.lat - dLat, maxLat = ne.lat + dLat;
       const minLng = sw.lng - dLng, maxLng = ne.lng + dLng;
@@ -628,6 +694,15 @@
       }
       return { culled };
     }
+
+    /** 该天是否还有"被卸载但未回填"的笔迹（视口回填时用来跳过无事可做的天） */
+    hasPending(day) {
+      const arr = this._unloaded.get(day);
+      return !!(arr && arr.length);
+    }
+
+    /** 开启/关闭视口裁剪（默认关闭；开启后必须保证 restoreDays 会被调用） */
+    setViewportCulling(on) { this._cullEnabled = Boolean(on); }
 
     /** 点亮一个街区块（约 150m 网格） */
     lightCell(lat, lng) {

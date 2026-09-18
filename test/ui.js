@@ -572,6 +572,14 @@ const shown = (id) => $(id).classList.contains('show');
       add(o) { this.added.push(o); }
       setCenter(p) { this.center = p; }
       setFitView() {}
+      // 供视口裁剪测试：bounds 可由测试注入（默认覆盖全球，即"什么都看得见"）
+      getBounds() {
+        const b = st.bounds || { south: -90, north: 90, west: -180, east: 180 };
+        return {
+          getSouthWest: () => ({ lat: b.south, lng: b.west }),
+          getNorthEast: () => ({ lat: b.north, lng: b.east }),
+        };
+      }
       destroy() { this.destroyed = true; }
     }
     class Marker {
@@ -738,13 +746,46 @@ const shown = (id) => $(id).classList.contains('show');
   ok('回填：展开全部历史后笔迹数恢复（不丢任何轨迹）',
     ap2._runs.length > beforeRestore, 'restored=' + (rr && rr.restored) + ' onMap=' + ap2._runs.length);
 
-  // C-3：视口裁剪是可逆的
-  const statsA = ap2.runStats();
+  // C-3：视口裁剪默认**关闭**（v0.9.57：绝不因平移而擅自卸载，安全优先）
+  const runsBeforeCull = ap2._runs.length;
   ap2.cullOutsideViewport(0);
-  const statsB = ap2.runStats();
-  ok('视口裁剪：离开视野的笔迹被卸载（且可回填）',
-    statsB.onMap <= statsA.onMap && statsB.neverDropped === true,
-    JSON.stringify({ a: statsA.onMap, b: statsB.onMap }));
+  ok('视口裁剪：默认关闭，调用它也不会卸载任何笔迹',
+    ap2._runs.length === runsBeforeCull, 'onMap=' + ap2._runs.length + ' before=' + runsBeforeCull);
+
+  // C-4：显式开启后卸载是可逆的，且**逐笔精确回填**（v0.9.57 修的核心回归）
+  ap2.setViewportCulling(true);
+  ap2._unloaded.clear();
+  const beforeCull2 = ap2._runs.length;
+  // 把视口缩到只覆盖第一个测试点附近（20,110）→ 其它笔迹都在视野外
+  amapSt.bounds = { south: 19.99, north: 20.01, west: 109.99, east: 110.01 };
+  ap2.cullOutsideViewport(0);
+  const culled2 = beforeCull2 - ap2._runs.length;
+  ok('视口裁剪：开启后确实卸载了视野外的笔迹', culled2 > 0,
+    'culled=' + culled2 + ' before=' + beforeCull2 + ' after=' + ap2._runs.length);
+  ok('视口裁剪：卸载后待回填登记 > 0（可回填，非删除）',
+    ap2.runStats().unloadedPending > 0, JSON.stringify(ap2.runStats()));
+  // 回填：逐笔精确恢复 —— 这是修复的关键（旧版按"整天是否有笔迹"跳过，导致部分卸载的永远回不来）
+  const restoredCull = ap2.restoreAll(segCache);
+  ok('视口回填：卸载的笔迹全部回来了（逐笔精确还原，不丢任何一条）',
+    ap2._runs.length === beforeCull2,
+    'onMap=' + ap2._runs.length + ' expect=' + beforeCull2 + ' restored=' + (restoredCull && restoredCull.restored));
+  ok('视口回填：回填后待回填登记清零',
+    ap2.runStats().unloadedPending === 0, JSON.stringify(ap2.runStats()));
+  // 部分卸载场景：同一天里只卸一部分，回填也必须是"部分回填"而不是整日跳过
+  ap2._unloaded.clear();
+  const runsPart = ap2._runs.length;
+  if (runsPart >= 3) {
+    ap2._unloadRun(0, 'test-partial');
+    const afterPartial = ap2._runs.length;
+    ap2.restoreAll(segCache);
+    ok('视口回填：同一天被卸载「一部分」时也能全部回来（不再整日跳过）',
+      ap2._runs.length === runsPart,
+      'onMap=' + ap2._runs.length + ' expect=' + runsPart + ' (卸载中途=' + afterPartial + ')');
+  } else {
+    ok('视口回填：同一天被卸载「一部分」时也能全部回来（不再整日跳过）', true, 'skip: runs 太少');
+  }
+  ap2.setViewportCulling(false);
+  delete amapSt.bounds;
 
   // 安全网：真超上限时只做"可回填卸载"，绝不静默丢弃
   ap2._safetyCap = 1;
@@ -754,6 +795,7 @@ const shown = (id) => $(id).classList.contains('show');
   ok('安全网：触发上限时卸载可回填，且 neverDropped 仍为 true',
     ns.neverDropped === true, JSON.stringify(ns));
   ap2._safetyCap = 6000;
+  ap2._unloaded.clear();
 
   ok('L2 阶段无运行时错误', errors.length === 0, errors.slice(0, 2).join(' | '));
 

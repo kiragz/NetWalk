@@ -795,37 +795,37 @@
         // 地图自由拖动：用户拖动 → 自动解除镜头跟踪；🎯 按钮一键回到分身并恢复跟踪
         if (p.map && p.map.on) {
           p.map.on('dragstart', () => { setMapFollowing(false); });
-          // 【C 方案】视口裁剪 + 回填：
-          // 平移/缩放后，把已经离开视野的笔迹卸载（地图对象数恒定），
-          // 再把它带回视野的部分补画回来 —— 全程可逆，**不丢任何轨迹**。
+          // 【C 方案】视口回填：
+          // ⚠ v0.9.57 起**不再在平移/缩放时自动卸载**（cullOutsideViewport 默认关闭）。
+          // 过早/过频的裁剪会让用户"拖着地图看一圈"后发现轨迹少了 —— 安全优先，
+          // 宁可多挂一些地图对象，也绝不因为看了别的区域而让已画的轨迹消失。
+          // 这里只做"把之前卸载过、现在又回到视野里的笔迹**补回来**"（纯增量，不卸载）。
           let vpTimer = null;
           const onViewChanged = () => {
             if (vpTimer) clearTimeout(vpTimer);
-            // 防抖：拖动/缩放过程中不重算，停稳 260ms 后再做
             vpTimer = setTimeout(() => {
               vpTimer = null;
               try {
                 const cache = state.netwalkSegCache;
                 if (!cache || !state.provider) return;
-                if (state.provider.cullOutsideViewport) state.provider.cullOutsideViewport(0.25);
-                // 把视口附近的天补回来（先粗筛：按笔迹锚点判断哪些天可能在视野内）
-                if (state.provider.restoreDays) {
-                  const b = state.provider.map && state.provider.map.getBounds && state.provider.map.getBounds();
-                  if (!b) return;
-                  const sw = b.getSouthWest(), ne = b.getNorthEast();
-                  const near = [];
-                  for (const [day, segs] of cache) {
-                    for (const seg of segs) {
-                      let hit = false;
-                      for (const pt of seg) {
-                        if (pt.lat >= sw.lat - 0.3 && pt.lat <= ne.lat + 0.3
-                          && pt.lng >= sw.lng - 0.3 && pt.lng <= ne.lng + 0.3) { hit = true; break; }
-                      }
-                      if (hit) { near.push(day); break; }
+                if (!state.provider.restoreDays) return;
+                const b = state.provider.map && state.provider.map.getBounds && state.provider.map.getBounds();
+                if (!b) return;
+                const sw = b.getSouthWest(), ne = b.getNorthEast();
+                const near = [];
+                for (const [day, segs] of cache) {
+                  // 只补还"有待回填登记"的天，避免无谓重复计算
+                  if (!state.provider.hasPending || !state.provider.hasPending(day)) continue;
+                  for (const seg of segs) {
+                    let hit = false;
+                    for (const pt of seg) {
+                      if (pt.lat >= sw.lat - 0.3 && pt.lat <= ne.lat + 0.3
+                        && pt.lng >= sw.lng - 0.3 && pt.lng <= ne.lng + 0.3) { hit = true; break; }
                     }
+                    if (hit) { near.push(day); break; }
                   }
-                  if (near.length) state.provider.restoreDays(near, cache);
                 }
+                if (near.length) state.provider.restoreDays(near, cache);
               } catch (_) { /* 视口优化失败不能影响行走 */ }
             }, 260);
           };
@@ -1304,10 +1304,13 @@
 
       if (!flatCount) { log('地图上还没有历史轨迹，本次行走将开始画线'); }
 
-      // 日期分层：默认只画最近 N 天（N 可配），更早的**卸载但不丢弃**，随时可回填。
-      const lazyDays = Math.max(1, Number(localStorage.netwalkLayerDays) || 7);
+      // 日期分层：默认**全部显示**（不折叠任何一天）。
+      // ⚠ v0.9.57 起默认值从 7 改为 0=不限：用户明确要求"不能删路线轨迹"，
+      // 而折叠虽然数据没丢，却让用户**看到**的轨迹变少 —— 观感上就是"丢了"。
+      // 需要更省内存时可在设置里手动指定天数（localStorage.netwalkLayerDays）。
+      const lazyDays = Math.max(0, Number(localStorage.netwalkLayerDays) || 0);
       const allDates = Array.from(segCache.keys()).sort();
-      const keepDates = allDates.slice(-lazyDays);
+      const keepDates = lazyDays > 0 ? allDates.slice(-lazyDays) : allDates;
 
       // 先清空并把要展示的天画上
       let first = true;
@@ -1324,7 +1327,7 @@
       if (flatCount < 2) { /* 无历史，静默 */ }
       else {
         log(`已把历史轨迹画上地图：共 ${allDates.length} 天 / ${flatCount} 个点`
-          + (hidden > 0 ? `，当前显示最近 ${keepDates.length} 天（更早的 ${hidden} 天已折叠，点「显示全部」或缩小地图即可展开，数据一直都在）` : ''));
+          + (hidden > 0 ? `（当前只显示最近 ${keepDates.length} 天，更早的 ${hidden} 天已折叠；点「🗺 显示全部历史」展开，数据一直都在）` : '，全部显示'));
       }
 
       for (const st of starts) {
