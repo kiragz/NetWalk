@@ -221,8 +221,26 @@
 
     speedColorIndex(spd) {
       const t = Math.max(0, Math.min(0.999, (Number(spd) || 0) / 16));
-      return Math.floor(t * 10);
+      return Math.floor(t * (this._colorLevels || 10));
     }
+
+    /** 与高德 provider 同名（演练模式是 SVG path，不存在地图对象数问题，这里只做兼容） */
+    setColorLevels(n) {
+      const lv = Math.max(3, Math.min(10, Math.round(Number(n) || 10)));
+      this._colorLevels = lv;
+    }
+
+    setRunTolerance() { /* 演练模式无需抽稀 */ }
+
+    applyDayFilter() { return { kept: 0, unloaded: 0 }; }
+
+    restoreAll() { return { restored: 0 }; }
+
+    restoreDays() { return 0; }
+
+    cullOutsideViewport() { return { culled: 0 }; }
+
+    runStats() { return { onMap: 0, unloadedPending: 0, capUnloaded: 0, neverDropped: true }; }
 
     addTrackPoint(lat, lng, prev, spd) {
       if (!this.trackEl) return;
@@ -283,6 +301,7 @@
         if (this.trackEl) this.trackEl.setAttribute('d', '');
       }
       // append=true：追加新的一段（不断笔也绝不与上一段相连 —— 每对点都是独立的 M+L 子路径）
+      // 注：第 3 个参数 day 与高德 provider 签名保持一致（演练模式按 SVG 渲染，无需分层）
       for (let i = 1; i < (points || []).length; i++) {
         this.addTrackPoint(points[i].lat, points[i].lng, points[i - 1], points[i].spd);
       }

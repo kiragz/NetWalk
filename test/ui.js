@@ -678,6 +678,85 @@ const shown = (id) => $(id).classList.contains('show');
   const amapRoad = await ap.roadAt(22.55, 114.07, { force: true });
   ok('roadAt 取到真实路名', amapRoad === '测试街道', amapRoad);
 
+  // ---------- v0.9.56「永不删轨迹」：颜色合并 + 抽稀 + 日期分层 + 视口裁剪 ----------
+  console.log('\n== L2. 永不删轨迹（A 颜色合并/抽稀 + C 分层/视口） ==');
+  const ap2 = new win.AmapProvider({ key: 'test-key', zoom: 16 });
+  await ap2.init($('map'), { center: { lng: 114.057868, lat: 22.543099 } });
+
+  // A-1：颜色合并（10 档 → 5 档）后，同一速度落在更少的档位上
+  ap2.setColorLevels(10);
+  const i10 = ap2.speedColorIndex(8);
+  ap2.setColorLevels(5);
+  const i5 = ap2.speedColorIndex(8);
+  ok('颜色合并：5 档时档位索引不超过 4', i5 >= 0 && i5 <= 4, 'i10=' + i10 + ' i5=' + i5);
+  ok('颜色合并：档位确实变粗（10档时更细）', ap2._colorLevels === 5);
+
+  // A-2：抽稀 —— 同一段路上速度换档，不应新起笔迹
+  ap2.setRunTolerance(0.10);      // 100m
+  const runsBeforeThin = amapSt.speedLines.length;
+  // 两点相距约 11m（0.0001 度），速度从 2 跳到 8 → 换档但位移远小于 100m → 应复用同一笔迹
+  ap2.setTrack([{ lat: 30.0, lng: 120.0, spd: 2 }, { lat: 30.0001, lng: 120.0001, spd: 8 }]);
+  const thinNew = amapSt.speedLines.length - runsBeforeThin;
+  ok('抽稀：换档但位移很小 → 不新起笔迹（省对象数）', thinNew === 1,
+    'newRuns=' + thinNew);
+
+  // A-3：抽稀不会把远处的段连起来（飞线回归）
+  const runsBeforeFar = amapSt.speedLines.length;
+  ap2.setTrack([{ lat: 31.0, lng: 121.0, spd: 8 }, { lat: 31.0001, lng: 121.0001, spd: 2 }]);
+  const farRuns = amapSt.speedLines.slice(runsBeforeFar);
+  const cross = farRuns.filter((l) => {
+    const lats = (l.path || []).map((p) => p.lat);
+    return lats.some((x) => x < 30.5) && lats.some((x) => x > 30.5);
+  });
+  ok('抽稀：远处的新段仍然另起笔迹（不连飞线）', cross.length === 0, 'cross=' + cross.length);
+
+  // C-1：日期分层 —— 只保留指定日期，其余"卸载待回填"（不是删除）
+  const segCache = new Map([
+    ['2026-08-01', [[{ lat: 20, lng: 110, spd: 5 }, { lat: 20.001, lng: 110.001, spd: 5 }]]],
+    ['2026-08-02', [[{ lat: 21, lng: 111, spd: 5 }, { lat: 21.001, lng: 111.001, spd: 5 }]]],
+    ['2026-08-03', [[{ lat: 22, lng: 112, spd: 5 }, { lat: 22.001, lng: 112.001, spd: 5 }]]],
+  ]);
+  // 先全部画上
+  let firstSeg = true;
+  for (const [day, segs] of segCache) {
+    for (const s of segs) { ap2.setTrack(s, { append: !firstSeg, day }); firstSeg = false; }
+  }
+  const totalOnMap = ap2._runs.length;
+  // 只保留最后一天
+  const flt = ap2.applyDayFilter(new Set(['2026-08-03']), segCache);
+  ok('日期分层：只保留指定日期，其余卸载',
+    flt.unloaded >= 2 && ap2._runs.length < totalOnMap,
+    'unloaded=' + flt.unloaded + ' onMap=' + ap2._runs.length + ' before=' + totalOnMap);
+  ok('日期分层：被卸载的笔迹登记为「待回填」而非删除',
+    ap2.runStats().unloadedPending >= 2, JSON.stringify(ap2.runStats()));
+  ok('日期分层：关键不变式 neverDropped（卸载的一定能回填）',
+    ap2.runStats().neverDropped === true, JSON.stringify(ap2.runStats()));
+
+  // C-2：回填 —— 展开全部历史，之前卸载的天重新画回来，点数不丢
+  const beforeRestore = ap2._runs.length;
+  const rr = ap2.restoreAll(segCache);
+  ok('回填：展开全部历史后笔迹数恢复（不丢任何轨迹）',
+    ap2._runs.length > beforeRestore, 'restored=' + (rr && rr.restored) + ' onMap=' + ap2._runs.length);
+
+  // C-3：视口裁剪是可逆的
+  const statsA = ap2.runStats();
+  ap2.cullOutsideViewport(0);
+  const statsB = ap2.runStats();
+  ok('视口裁剪：离开视野的笔迹被卸载（且可回填）',
+    statsB.onMap <= statsA.onMap && statsB.neverDropped === true,
+    JSON.stringify({ a: statsA.onMap, b: statsB.onMap }));
+
+  // 安全网：真超上限时只做"可回填卸载"，绝不静默丢弃
+  ap2._safetyCap = 1;
+  ap2.restoreAll(segCache);
+  ap2.setTrack([{ lat: 40, lng: 130, spd: 5 }, { lat: 40.5, lng: 130.5, spd: 5 }]);
+  const ns = ap2.runStats();
+  ok('安全网：触发上限时卸载可回填，且 neverDropped 仍为 true',
+    ns.neverDropped === true, JSON.stringify(ns));
+  ap2._safetyCap = 6000;
+
+  ok('L2 阶段无运行时错误', errors.length === 0, errors.slice(0, 2).join(' | '));
+
   ap.destroy();
   ok('destroy 后 ready=false 且清空引用', ap._ready === false && ap._arrowEl === null);
   ok('L 阶段无运行时错误', errors.length === 0, errors.slice(0, 2).join(' | '));

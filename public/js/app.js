@@ -72,7 +72,7 @@
     maskAch: $('maskAch'), achBody: $('achBody'), btnAchClose: $('btnAchClose'),
     maskStats: $('maskStats'), statsTabs: $('statsTabs'), statsGrid: $('statsGrid'),
     statsDaily: $('statsDaily'), btnStatsClose: $('btnStatsClose'),
-    btnStatsFix: $('btnStatsFix'), btnLinkFix: $('btnLinkFix'),
+    btnStatsFix: $('btnStatsFix'), btnLinkFix: $('btnLinkFix'), btnShowAll: $('btnShowAll'),
     maskArchive: $('maskArchive'), arCode: $('arCode'), arInput: $('arInput'), arHint: $('arHint'),
     btnArGen: $('btnArGen'), btnArCopy: $('btnArCopy'), btnArImport: $('btnArImport'), btnArClose: $('btnArClose'),
     btnArApplyCfg: $('btnArApplyCfg'),
@@ -706,6 +706,7 @@
       repairArea,
       loadAllDays,
       drawHistoryOnMap,
+      showAllHistory,     // 展开被日期分层折叠的更早历史（可回填，不丢数据）
     };
     window.NetWalkRepairUtil = { splitByDistance, insideBounds, countInBounds, nextPieceIndex, bboxOf, pathLen, routeSane };
     bindProfileUi();
@@ -794,6 +795,42 @@
         // 地图自由拖动：用户拖动 → 自动解除镜头跟踪；🎯 按钮一键回到分身并恢复跟踪
         if (p.map && p.map.on) {
           p.map.on('dragstart', () => { setMapFollowing(false); });
+          // 【C 方案】视口裁剪 + 回填：
+          // 平移/缩放后，把已经离开视野的笔迹卸载（地图对象数恒定），
+          // 再把它带回视野的部分补画回来 —— 全程可逆，**不丢任何轨迹**。
+          let vpTimer = null;
+          const onViewChanged = () => {
+            if (vpTimer) clearTimeout(vpTimer);
+            // 防抖：拖动/缩放过程中不重算，停稳 260ms 后再做
+            vpTimer = setTimeout(() => {
+              vpTimer = null;
+              try {
+                const cache = state.netwalkSegCache;
+                if (!cache || !state.provider) return;
+                if (state.provider.cullOutsideViewport) state.provider.cullOutsideViewport(0.25);
+                // 把视口附近的天补回来（先粗筛：按笔迹锚点判断哪些天可能在视野内）
+                if (state.provider.restoreDays) {
+                  const b = state.provider.map && state.provider.map.getBounds && state.provider.map.getBounds();
+                  if (!b) return;
+                  const sw = b.getSouthWest(), ne = b.getNorthEast();
+                  const near = [];
+                  for (const [day, segs] of cache) {
+                    for (const seg of segs) {
+                      let hit = false;
+                      for (const pt of seg) {
+                        if (pt.lat >= sw.lat - 0.3 && pt.lat <= ne.lat + 0.3
+                          && pt.lng >= sw.lng - 0.3 && pt.lng <= ne.lng + 0.3) { hit = true; break; }
+                      }
+                      if (hit) { near.push(day); break; }
+                    }
+                  }
+                  if (near.length) state.provider.restoreDays(near, cache);
+                }
+              } catch (_) { /* 视口优化失败不能影响行走 */ }
+            }, 260);
+          };
+          try { p.map.on('moveend', onViewChanged); } catch (_) { /* noop */ }
+          try { p.map.on('zoomend', onViewChanged); } catch (_) { /* noop */ }
         }
         el.rowAmap.style.display = 'flex';
         updateAmapCalls();
@@ -1233,33 +1270,75 @@
     return segs;
   }
 
-  /** 把历史上所有走过的轨迹画到主地图（按速度渐变分色），出发时调用 */
+  /**
+   * 把历史上所有走过的轨迹画到主地图（按速度渐变分色），出发时调用。
+   *
+   * ⚠ 核心原则（v0.9.56 起）：**任何情况下都不允许为了渲染性能删掉用户走过的轨迹**。
+   * 旧实现用 FIFO 上限（超 2400 删最老 600 条），历史重放时会把「第 N 次出发之前」
+   * 的轨迹成批删掉 —— 那是渲染层的静默丢失。现在改为三层：
+   *   ① 颜色合并（10 档→5 档）+ 换色抽稀（100m）：笔迹对象数先降一个数量级；
+   *   ② 日期分层：地图上只保留最近 N 天的笔迹，其余**可回填卸载**（不是删除）；
+   *   ③ 视口裁剪：平移离开视野的笔迹卸载，回来自动补画。
+   * 于是地图上的笔迹总数与"历史有多长"无关，永远够用，不需要丢弃任何历史。
+   */
   async function drawHistoryOnMap(origin) {
     if (!state.provider || !state.provider.setTrack) return;
     try {
       const r = await fetch('/api/track/range?from=0000-01-01&to=' + today()).then((x) => x.json());
       const days = (r && r.days) || [];
-      const flat = days.flatMap((d) => d.path || []);
+      const starts = (r && r.starts) || [];
 
-      if (flat.length < 2) { log('地图上还没有历史轨迹，本次行走将开始画线'); }
-      else {
-        const segs = splitTrackSegments(flat, (r && r.starts) || []);
-        // 历史重放期放宽笔迹上限：否则一次性重放上千条笔迹会触发「移除最老 600 条」，
-        // 把最早画的（第 N 次出发之前的）轨迹整批删掉 —— 表现为「某次出发前的轨迹全没了」。
-        if (state.provider.beginReplay) state.provider.beginReplay();
-        try {
-          segs.forEach((seg, idx) => {
-            state.provider.setTrack(seg, { append: idx > 0 });
-          });
-        } finally {
-          if (state.provider.endReplay) state.provider.endReplay();
-        }
-        log(`已把历史轨迹画上地图：${days.length} 天、${flat.length} 个点、${segs.length} 段连续轨迹（已剔除跨设备/跨会话飞线）`);
+      // 逐天切段并缓存（回填时按天重画，不必重新请求、不必重算）
+      const segCache = new Map();
+      let flatCount = 0;
+      for (const d of days) {
+        const segs = splitTrackSegments(d.path || [], starts);
+        if (segs.length) segCache.set(d.date, segs);
+        flatCount += (d.path || []).length;
       }
-      for (const st of (r && r.starts) || []) {
+
+      // 颜色合并 + 抽稀：把笔迹数压下来（可通过设置关闭，见 setRunTolerance）
+      if (state.provider.setColorLevels) state.provider.setColorLevels(Number(localStorage.netwalkSpeedLevels) || 5);
+      if (state.provider.setRunTolerance) state.provider.setRunTolerance(
+        localStorage.netwalkNoThin === '1' ? 0 : 0.10);
+
+      if (!flatCount) { log('地图上还没有历史轨迹，本次行走将开始画线'); }
+
+      // 日期分层：默认只画最近 N 天（N 可配），更早的**卸载但不丢弃**，随时可回填。
+      const lazyDays = Math.max(1, Number(localStorage.netwalkLayerDays) || 7);
+      const allDates = Array.from(segCache.keys()).sort();
+      const keepDates = allDates.slice(-lazyDays);
+
+      // 先清空并把要展示的天画上
+      let first = true;
+      for (const date of keepDates) {
+        for (const seg of segCache.get(date)) {
+          state.provider.setTrack(seg, { append: !first, day: date });
+          first = false;
+        }
+      }
+      state.netwalkSegCache = segCache;
+      state.netwalkAllDates = allDates;
+
+      const hidden = allDates.length - keepDates.length;
+      if (flatCount < 2) { /* 无历史，静默 */ }
+      else {
+        log(`已把历史轨迹画上地图：共 ${allDates.length} 天 / ${flatCount} 个点`
+          + (hidden > 0 ? `，当前显示最近 ${keepDates.length} 天（更早的 ${hidden} 天已折叠，点「显示全部」或缩小地图即可展开，数据一直都在）` : ''));
+      }
+
+      for (const st of starts) {
         if (state.provider.addStartMarker) state.provider.addStartMarker(st.lat, st.lng, st.n);
       }
     } catch (_) { /* 离线时忽略，不影响行走 */ }
+  }
+
+  /** 展开全部历史（用户显式要求时调用） */
+  function showAllHistory() {
+    if (!state.provider || !state.provider.restoreAll || !state.netwalkSegCache) return 0;
+    const r = state.provider.restoreAll(state.netwalkSegCache);
+    log(`已展开全部 ${(state.netwalkAllDates || []).length} 天历史轨迹（${r && r.restored || 0} 天回填重画）`);
+    return r && r.restored || 0;
   }
 
   // ------------------------------------------------------------------
@@ -1632,6 +1711,15 @@
           el.btnLinkFix.disabled = false;
           el.btnLinkFix.textContent = old;
         }
+      });
+    }
+    // 「显示全部历史」：把因日期分层折叠起来的更早轨迹全部展开。
+    // 数据从未被删除，这里只是把之前"卸载待回填"的天重新画到地图上。
+    if (el.btnShowAll) {
+      el.btnShowAll.addEventListener('click', async () => {
+        const n = showAllHistory();
+        if (!n) { log('没有需要展开的历史轨迹（当前已经全部显示）'); return; }
+        try { if (state.provider.fit) state.provider.fit(); } catch (_) { /* noop */ }
       });
     }
     if (el.btnRepairGo) {
