@@ -72,7 +72,7 @@
     maskAch: $('maskAch'), achBody: $('achBody'), btnAchClose: $('btnAchClose'),
     maskStats: $('maskStats'), statsTabs: $('statsTabs'), statsGrid: $('statsGrid'),
     statsDaily: $('statsDaily'), btnStatsClose: $('btnStatsClose'),
-    btnStatsFix: $('btnStatsFix'),
+    btnStatsFix: $('btnStatsFix'), btnLinkFix: $('btnLinkFix'),
     maskArchive: $('maskArchive'), arCode: $('arCode'), arInput: $('arInput'), arHint: $('arHint'),
     btnArGen: $('btnArGen'), btnArCopy: $('btnArCopy'), btnArImport: $('btnArImport'), btnArClose: $('btnArClose'),
     btnArApplyCfg: $('btnArApplyCfg'),
@@ -1197,25 +1197,24 @@
    * ① 跨会话：点的会话号不同，或跨过某次「出发」的时间点
    * ② 空间断：相邻点跳变 >250m（瞬移 / 直线兜底留下的跨块直线）
    * ③ 时间断档：>15 分钟（中间没走，连起来也是假线）
+   *
+   * 关于会话号（no）：它是用来防止「跨设备合并后把两台设备的位置连成飞线」的。
+   * 但 no 只允许在**真实断开**时切笔 —— 相邻点位移很小（同一段路继续走）却只因 no 抖动
+   * 就断笔，会把一整天的轨迹切成几百个碎段，而长度 1 的碎段又会被丢弃，最终表现成
+   * 「某一段之前的轨迹全没了」（历史 bug：renumberSessions 改序号没同步改点的 no）。
+   * 因此这里收紧 no 的切笔条件：只有位移较大（>60m，说明确实换了地方）才因 no 不同而断笔。
    */
   function splitTrackSegments(points, starts) {
     const st = (starts || []).map((x) => Number(x.t !== undefined ? x.t : x)).filter(Boolean).sort((a, b) => a - b);
     const segs = [];
     let cur = [];
     let si = 0;
+    const flush = () => { if (cur.length) segs.push(cur); cur = []; };
     for (const p of points) {
       // 直线兜底的点不画（用户要求去掉飞线）：直接断开并跳过该点。
       // 这类段的缺口可以随时用「🧭 轨迹整备」重新沿真实道路补上。
-      if (p.straight) {
-        if (cur.length > 1) segs.push(cur);
-        cur = [];
-        continue;
-      }
-      while (si < st.length && st[si] <= (p.t || 0)) {
-        si++;
-        if (cur.length > 1) segs.push(cur);
-        cur = [];
-      }
+      if (p.straight) { flush(); continue; }
+      while (si < st.length && st[si] <= (p.t || 0)) { si++; flush(); }
       if (cur.length) {
         const prev = cur[cur.length - 1];
         const noA = Number(prev.no) || 0, noB = Number(p.no) || 0;
@@ -1223,14 +1222,14 @@
         const dt = (p.t || 0) - (prev.t || 0);
         // 时间断档 >15 分钟：只有当断档期间位置还移动了 >100m 才切开 ——
         // 原地暂停（挂机/休息）位置没变，连起来是无害的零长度线，切开反而让轨迹断成两截（用户要求）。
-        if (m > 250 || (dt > 15 * 60000 && m > 100) || (noA && noB && noA !== noB)) {
-          if (cur.length > 1) segs.push(cur);
-          cur = [];
+        // 会话号不同：仅在位移 >60m 时才认为真的换了地方（否则是序号抖动，继续连笔）。
+        if (m > 250 || (dt > 15 * 60000 && m > 100) || (noA && noB && noA !== noB && m > 0.06)) {
+          flush();
         }
       }
       cur.push(p);
     }
-    if (cur.length > 1) segs.push(cur);
+    flush();
     return segs;
   }
 
@@ -1245,9 +1244,16 @@
       if (flat.length < 2) { log('地图上还没有历史轨迹，本次行走将开始画线'); }
       else {
         const segs = splitTrackSegments(flat, (r && r.starts) || []);
-        segs.forEach((seg, idx) => {
-          state.provider.setTrack(seg, { append: idx > 0 });
-        });
+        // 历史重放期放宽笔迹上限：否则一次性重放上千条笔迹会触发「移除最老 600 条」，
+        // 把最早画的（第 N 次出发之前的）轨迹整批删掉 —— 表现为「某次出发前的轨迹全没了」。
+        if (state.provider.beginReplay) state.provider.beginReplay();
+        try {
+          segs.forEach((seg, idx) => {
+            state.provider.setTrack(seg, { append: idx > 0 });
+          });
+        } finally {
+          if (state.provider.endReplay) state.provider.endReplay();
+        }
         log(`已把历史轨迹画上地图：${days.length} 天、${flat.length} 个点、${segs.length} 段连续轨迹（已剔除跨设备/跨会话飞线）`);
       }
       for (const st of (r && r.starts) || []) {
@@ -1588,6 +1594,43 @@
         } finally {
           el.btnStatsFix.disabled = false;
           el.btnStatsFix.textContent = old;
+        }
+      });
+    }
+    // 🔗 修复轨迹归属：把轨迹点的会话号重新对准出发记录。
+    // 用于修「某几次出发显示 0 个轨迹点」或「地图上某段历史轨迹没画出来」——
+    // 轨迹点不会被删除或移动，只改归属标签。
+    if (el.btnLinkFix) {
+      el.btnLinkFix.addEventListener('click', async () => {
+        const ok = askConfirm(
+          '🔗 修复轨迹归属\n\n'
+          + '把每个轨迹点的「属于第几次出发」标签重新对准出发记录。\n'
+          + '用于修：某几次出发显示 0 个轨迹点、或地图上某段历史轨迹没画出来。\n\n'
+          + '轨迹点本身不会被删除或移动，只改归属标签，可以放心执行。\n\n'
+          + '是否继续？',
+        );
+        if (!ok) return;
+        el.btnLinkFix.disabled = true;
+        const old = el.btnLinkFix.textContent;
+        el.btnLinkFix.textContent = '修复中…';
+        try {
+          const r = await fetch('/api/track/repair-links', {
+            method: 'POST', headers: { 'Content-Type': 'application/json' }, body: '{}',
+          }).then((x) => x.json());
+          if (!r || !r.ok) { log('修复轨迹归属失败：' + ((r && r.error) || '未知错误')); return; }
+          if (r.fixed) {
+            log(`🔗 已修复 ${r.fixed} 个轨迹点的归属（涉及 ${r.days} 天）`
+              + (r.orphanBefore ? `；原有 ${r.orphanBefore} 个点找不到所属出发，已归到最近的一次` : '')
+              + '。轨迹点一个都没动，只是标签对准了。');
+          } else {
+            log('🔗 轨迹归属本来就一致，无需修正');
+          }
+          try { await drawHistoryOnMap(state.origin); } catch (_) { /* 地图重画失败不影响数据 */ }
+        } catch (e) {
+          log('修复轨迹归属失败：' + (e && e.message ? e.message : e));
+        } finally {
+          el.btnLinkFix.disabled = false;
+          el.btnLinkFix.textContent = old;
         }
       });
     }

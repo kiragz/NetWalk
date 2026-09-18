@@ -28,3 +28,4 @@ NetWalk-data/
 # 构建脚本自动生成，可由 `npm run payload` 重新产出
 server/native-payload.js
 server/public-payload.js
+_t/

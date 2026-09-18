@@ -531,9 +531,39 @@ class TrackStore {
         counts.set(n, (counts.get(n) || 0) + 1);
       }
     }
-    for (const d of this.listDates().sort()) {
+    // 轨迹点是跨天归属的：第 N 次出发的点可能落在第二天（例如 23:57 出发走到次日凌晨）。
+    // 因此点数必须按**全局会话号**统计，不能按天分别统计 —— 否则会出现
+    // 「#18 显示 0 点、而第二天的 #19 虚高」这种看起来像"轨迹丢了"的假象。
+    // 兜底：若某次出发按 no 数不到点（历史数据 no 与 sessions 错位），
+    // 就按「时间落在该次出发与下一次出发之间」重新数一遍。
+    const byDate = this.listDates().sort();
+    const globSessions = [];
+    for (const d of byDate) {
+      for (const s of (this.load(d).sessions || [])) globSessions.push({ date: d, s });
+    }
+    globSessions.sort((a, b) => (Number(a.s.t) || 0) - (Number(b.s.t) || 0));
+    const allPts = [];
+    for (const d of byDate) {
+      for (const p of (this.load(d).path || [])) allPts.push(p);
+    }
+    allPts.sort((a, b) => (Number(a.t) || 0) - (Number(b.t) || 0));
+    const fallbackCount = new Map();
+    for (let i = 0; i < globSessions.length; i++) {
+      const t0 = Number(globSessions[i].s.t) || 0;
+      const t1 = globSessions[i + 1] ? (Number(globSessions[i + 1].s.t) || Infinity) : Infinity;
+      let c = 0;
+      for (const p of allPts) {
+        const t = Number(p.t) || 0;
+        if (t >= t0 && t < t1) c++;
+      }
+      fallbackCount.set(Number(globSessions[i].s.n), c);
+    }
+    for (const d of byDate) {
       for (const s of (this.load(d).sessions || [])) {
-        out.push({ date: d, n: s.n, lat: s.lat, lng: s.lng, t: s.t, points: counts.get(Number(s.n)) || 0 });
+        const n = Number(s.n);
+        const byNo = counts.get(n) || 0;
+        const byTime = fallbackCount.get(n) || 0;
+        out.push({ date: d, n: s.n, lat: s.lat, lng: s.lng, t: s.t, points: byNo || byTime });
       }
     }
     return out;
@@ -683,6 +713,14 @@ class TrackStore {
    * 全局重排出发序号：把所有日期的出发记录按时间排序后重新编号 1..N。
    * 多设备同步合并后，各设备各自的序号都从 1 开始会互相冲突，
    * 必须全局重排，两台设备的「第 N 次出发」才能对得上；重排后最大值就是总次数。
+   *
+   * 【重要】轨迹点上的 `no`（会话号）必须跟着一起改：它决定点的归属。
+   * 历史 bug：这里只改 sessions[].n 却没同步改 path[].no，导致每次「同步合并 / 回滚」后
+   * 轨迹点上的旧 no 变成孤儿 —— 出发记录显示 0 点、地图断笔。
+   * 修法：只重映射**旧序号集合 → 新序号集合**（按时间顺序一一对应），不按时间戳重新归属 ——
+   * 因为某次出发的轨迹本来就可能跨到第二天，按时间戳硬归属会把点从 A 次挪到 B 次。
+   * 若某次出发被删掉，它的点已经在 deleteSession 里处理过了，这里只需处理幸存序号。
+   * @returns {number} 重排后的出发总次数
    */
   renumberSessions() {
     const all = [];
@@ -692,10 +730,82 @@ class TrackStore {
       for (const s of data.sessions) all.push({ date: d, s });
     }
     if (!all.length) return 0;
+    // ⚠ 顺序很关键：必须在改 sessions[].n **之前**记下「旧序号 → 该次出发的时间」，
+    // 否则读到的已经是新序号，remap 就成了恒等映射（等于没改）。
     all.sort((a, b) => (Number(a.s.t) || 0) - (Number(b.s.t) || 0));
+    const remap = new Map();   // 旧 n → 新 n（按出发时间顺序一一对应）
+    all.forEach((x, i) => { remap.set(Number(x.s.n), i + 1); });
     all.forEach((x, i) => { x.s.n = i + 1; this.markDirty(x.date); });
+    // 同步修正轨迹点的会话号（含跨天的点：按全局旧→新映射改，不按日期切分）
+    for (const d of this.listDates()) {
+      const data = this.load(d);
+      if (!Array.isArray(data.path) || !data.path.length) continue;
+      let changed = false;
+      for (const p of data.path) {
+        const oldN = Number(p.no) || 0;
+        if (!oldN) continue;
+        const newN = remap.get(oldN);
+        if (newN && newN !== oldN) { p.no = newN; changed = true; }
+      }
+      if (changed) this.markDirty(d);
+    }
     this.flush();
     return all.length;
+  }
+
+  /**
+   * 自愈：修正历史数据里「轨迹点的会话号(no)与出发记录(sessions)对不上」的错位。
+   *
+   * 场景：早期版本 renumberSessions 只改了 sessions[].n 却没改 path[].no，
+   * 于是同步合并/回滚之后，轨迹点上的旧 no 成了孤儿 —— 出发记录显示「#N 轨迹 0 点」，
+   * 地图按 no 变化切段时也会在孤儿处断笔。数据本身没丢，只是归属标签错了。
+   *
+   * ⚠ 口径必须保守：**只改真正的孤儿点**（no 在 sessions 里根本不存在），
+   * 绝不按时间戳把已有正常归属的点"搬家"。
+   * 反例（实测踩过）：#12 与 #13 是相隔 9 秒的重复起步，#12 本来有 7 个正常点，
+   * 按「最后一次不晚于该点的出发」硬归属会把它们全划给 #13，反而把 #12 弄成 0 点。
+   * 所以这里只做一件事：给找不到爹的点，找最近的一次出发当爹。
+   * @returns {{ok:boolean, fixed:number, days:number, orphanBefore:number}}
+   */
+  repairSessionLinks() {
+    const all = [];
+    for (const d of this.listDates()) {
+      for (const s of (this.load(d).sessions || [])) all.push({ date: d, s });
+    }
+    all.sort((a, b) => (Number(a.s.t) || 0) - (Number(b.s.t) || 0));
+    if (!all.length) {
+      // 没有出发记录：把带 no 的点清成 0（无主），避免它们被当成"某次出发的点"
+      let cleared = 0;
+      for (const d of this.listDates()) {
+        const data = this.load(d);
+        for (const p of (data.path || [])) { if (Number(p.no)) { p.no = 0; cleared++; } }
+        if (cleared) this.markDirty(d);
+      }
+      this.flush();
+      return { ok: true, fixed: cleared, days: 0, orphanBefore: cleared };
+    }
+    const starts = all.map((x) => ({ n: Number(x.s.n) || 0, t: Number(x.s.t) || 0 })).filter((x) => x.n);
+    const valid = new Set(starts.map((x) => x.n));
+    let fixed = 0, orphanBefore = 0;
+    const touched = new Set();
+    for (const d of this.listDates()) {
+      const data = this.load(d);
+      if (!Array.isArray(data.path) || !data.path.length) continue;
+      let changed = false;
+      for (const p of data.path) {
+        const oldN = Number(p.no) || 0;
+        if (oldN && valid.has(oldN)) continue;      // 归属正常 → 一个字节都不动
+        orphanBefore++;
+        const t = Number(p.t) || 0;
+        // 找「出发时间 <= 该点时间」的最后一次出发；早于全部出发的归第一次
+        let want = starts[0].n;
+        for (const st of starts) { if (st.t <= t) want = st.n; else break; }
+        if (want && want !== oldN) { p.no = want; changed = true; fixed++; }
+      }
+      if (changed) { this.markDirty(d); touched.add(d); }
+    }
+    this.flush();
+    return { ok: true, fixed, days: touched.size, orphanBefore };
   }
 
   /**

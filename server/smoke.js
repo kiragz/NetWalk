@@ -394,6 +394,87 @@ p.planRoute(from, { lat: far.lat, lng: far.lng }).then(async (route) => {
   ok(afterMerge >= beforeMerge, '空壳同期数据不会把真实里程压小', `${beforeMerge} → ${afterMerge}`);
   ok(sMg.get('2026-09-11').path.length === 200, '合并后轨迹点未丢', String(sMg.get('2026-09-11').path.length));
 
+  console.log('\n== 7.68 轨迹归属自愈（修「出发 0 点 / 地图某段没画出来」） ==');
+  // 历史 bug：renumberSessions 只改 sessions[].n 却没同步改 path[].no，
+  // 于是同步合并/回滚后轨迹点的会话号成了孤儿 → 出发记录显示 0 点、地图断笔。
+  // 自愈口径必须保守：只给孤儿点找爹，不把已有正常归属的点搬家。
+  const dirLink = path.join(SMOKE_DIR, 'links');
+  rmBestEffort(dirLink);
+  const sLk = new TrackStore(dirLink);
+  const lkD = sLk.load('2026-09-12');
+  lkD.sessions = [{ n: 1, lat: 23.10, lng: 113.30, t: t0 }];
+  sLk.markDirty('2026-09-12');
+  let curLk = { lat: 23.10, lng: 113.30 };
+  const lkPts = [];
+  for (let i = 0; i < 40; i++) {
+    curLk = G.destPoint(curLk, 90, 25);
+    lkPts.push({ t: t0 + (i + 1) * 30000, lat: curLk.lat, lng: curLk.lng, road: '归属路', spd: 5, mode: 'walk', no: 501 });   // 孤儿会话号
+  }
+  sLk.appendPath('2026-09-12', lkPts);
+  // 修前：这 40 个点的 no=501 不在出发记录里，按 no 数不到它们
+  // （注意 allSessionStarts 有「按时间窗兜底」逻辑，所以这里直接查 no 口径）
+  const lkNoBefore = new Set(sLk.get('2026-09-12').path.map((p) => Number(p.no) || 0));
+  ok(lkNoBefore.has(501) && !lkNoBefore.has(1), '修前点的 no 是孤儿 501，不属于出发 #1', JSON.stringify([...lkNoBefore]));
+  // 自愈
+  const rep = sLk.repairSessionLinks();
+  ok(rep.ok && rep.fixed === 40, '自愈修正全部 40 个孤儿点', `fixed=${rep.fixed} orphan=${rep.orphanBefore}`);
+  const lkNoAfter = new Set(sLk.get('2026-09-12').path.map((p) => Number(p.no) || 0));
+  ok(lkNoAfter.has(1) && !lkNoAfter.has(501), '自愈后 40 个点全部归到出发 #1', JSON.stringify([...lkNoAfter]));
+  ok(sLk.get('2026-09-12').path.length === 40, '自愈不删点、不移动点', String(sLk.get('2026-09-12').path.length));
+  const rep2 = sLk.repairSessionLinks();
+  ok(rep2.fixed === 0, '自愈幂等（再跑一次 0 修正）', `fixed=${rep2.fixed}`);
+
+  console.log('\n== 7.68b 自愈只动孤儿点（不把正常归属的点搬家） ==');
+  // 反例回归：#12 与 #13 是相隔几秒的重复起步，#12 本来有正常点不能划给 #13
+  const dirLk2 = path.join(SMOKE_DIR, 'links2');
+  rmBestEffort(dirLk2);
+  const sLk2 = new TrackStore(dirLk2);
+  const lk2D = sLk2.load('2026-09-15');
+  lk2D.sessions = [
+    { n: 1, lat: 23.20, lng: 113.40, t: t0 },
+    { n: 2, lat: 23.20, lng: 113.40, t: t0 + 9000 },     // 9 秒后的重复起步
+  ];
+  sLk2.markDirty('2026-09-15');
+  sLk2.appendPath('2026-09-15', [
+    { t: t0 + 1000, lat: 23.2001, lng: 113.4001, road: 'X', spd: 5, no: 1 },
+    { t: t0 + 2000, lat: 23.2002, lng: 113.4002, road: 'X', spd: 5, no: 1 },
+    { t: t0 + 9500, lat: 23.2004, lng: 113.4004, road: 'X', spd: 5, no: 2 },
+  ]);
+  const repLk2 = sLk2.repairSessionLinks();
+  const lk2Pts = sLk2.get('2026-09-15').path;
+  ok(repLk2.fixed === 0, '正常归属的点一个都不改', `fixed=${repLk2.fixed}`);
+  ok(lk2Pts.filter((p) => Number(p.no) === 1).length === 2, '#12 的 2 个正常点仍属于 #12', JSON.stringify(lk2Pts.map((p) => p.no)));
+
+  console.log('\n== 7.69 renumberSessions 同步修正轨迹点的会话号 ==');
+  // 重排出发序号后，点的 no 必须跟着改，否则重排就是"制造孤儿"。
+  // 构造：两次出发（序号 1、2），但点上的 no 是错位的 5、6 →
+  // 重排后 sessions 仍是 1、2，点的 no 必须按 5→1、6→2 修正。
+  const dirRn = path.join(SMOKE_DIR, 'renum');
+  rmBestEffort(dirRn);
+  const sRn = new TrackStore(dirRn);
+  // 直接写 sessions 保证时间递增且带想要的旧序号
+  const rnD1 = sRn.load('2026-09-13');
+  rnD1.sessions = [{ n: 5, lat: 23.11, lng: 113.31, t: t0 }];
+  sRn.markDirty('2026-09-13');
+  const rnD2 = sRn.load('2026-09-14');
+  rnD2.sessions = [{ n: 6, lat: 23.12, lng: 113.32, t: t0 + 7200000 }];
+  sRn.markDirty('2026-09-14');
+  sRn.appendPath('2026-09-13', [
+    { t: t0 + 1000, lat: 23.11, lng: 113.31, road: 'A', spd: 5, no: 5 },
+    { t: t0 + 2000, lat: 23.1101, lng: 113.3101, road: 'A', spd: 5, no: 5 },
+  ]);
+  sRn.appendPath('2026-09-14', [
+    { t: t0 + 7201000, lat: 23.12, lng: 113.32, road: 'B', spd: 5, no: 6 },
+  ]);
+  sRn.renumberSessions();
+  const rn1 = sRn.get('2026-09-13').path.map((p) => Number(p.no));
+  const rn2 = sRn.get('2026-09-14').path.map((p) => Number(p.no));
+  ok(rn1.length === 2 && rn1.every((x) => x === 1), '重排后 09-13 的点会话号 5→1', JSON.stringify(rn1));
+  ok(rn2.length === 1 && rn2[0] === 2, '重排后 09-14 的点会话号 6→2（跨天也按全局映射）', JSON.stringify(rn2));
+  // 重排后再自愈不应再有改动
+  const rnRep = sRn.repairSessionLinks();
+  ok(rnRep.fixed === 0, '重排后无孤儿点（自愈 0 修正）', `fixed=${rnRep.fixed}`);
+
   console.log('\n== 7.7 今日路过：路名清单（不调用高德） ==');
   const dirRoad = path.join(SMOKE_DIR, 'roads');
   rmBestEffort(dirRoad);

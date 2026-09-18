@@ -841,6 +841,25 @@ app.post('/api/stats/recompute', (req, res) => {
   }
 });
 
+/**
+ * POST /api/track/repair-links
+ * 自愈：修正「轨迹点的会话号(no)与出发记录(sessions)对不上」的历史错位。
+ *
+ * 用途：早期版本在同步合并/回滚重排出发序号时，只改了 sessions[].n 却没同步改
+ * path[].no，于是轨迹点上的旧序号成了孤儿 —— 表现是「出发记录里某几次显示 0 点」
+ * 以及「地图上某次出发之前的轨迹没画出来」（数据其实一个点都没丢，只是归属标签错了）。
+ * 轨迹点本身不会被删除或移动，只改 no 标签。
+ */
+app.post('/api/track/repair-links', (req, res) => {
+  try {
+    const r = store.repairSessionLinks();
+    logLine(`track repair-links: 修正 ${r.fixed} 个点的会话号（涉及 ${r.days} 天，原有孤儿点 ${r.orphanBefore} 个）`);
+    res.json(Object.assign({ ok: true }, r));
+  } catch (e) {
+    res.status(500).json({ ok: false, error: e && e.message ? e.message : String(e) });
+  }
+});
+
 app.post('/api/session/start', (req, res) => {  const body = req.body || {};
   const date = body.date || todayStr();
   store.setContext(date, { city: body.city, scope: body.scope });

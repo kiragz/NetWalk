@@ -404,6 +404,46 @@ async function main() {
     Number(stAfter19.agg.totalDistance) >= distBefore19,
     `${distBefore19} → ${stAfter19.agg.totalDistance}`);
 
+  console.log('\n== 20. 轨迹归属自愈（修「某次出发 0 点 / 某段轨迹没画出来」） ==');
+  // 历史 bug：renumberSessions 只改 sessions[].n 没同步改 path[].no，
+  // 于是同步合并/回滚后轨迹点的会话号成了孤儿 → 出发记录显示 0 点、地图断笔。
+  // 这里直接造出「点的 no 是孤儿」的数据，再调自愈接口，验证能修回来。
+  const fixDay = '2026-08-20';
+  const start20 = await post('/api/session/start', { date: fixDay, city: '深圳', scope: 'city', lat: 24.20, lng: 115.20 });
+  // 点的 t 必须晚于出发瞬间（否则归属逻辑会把它们算到更早的那次出发上）
+  const fixT0 = Date.now();
+  await post('/api/track/path', { date: fixDay, points: [
+    { t: fixT0 + 1000, lat: 24.2001, lng: 115.2001, spd: 5, no: 999 },
+    { t: fixT0 + 2000, lat: 24.2002, lng: 115.2002, spd: 5, no: 999 },
+  ] });
+  const before20 = await J('/api/sessions');
+  const orphanEntry = (before20.starts || []).find((s) => Number(s.n) === Number(start20.sessionNo));
+  const ptsBefore20 = (orphanEntry && orphanEntry.points) || 0;
+  ok('20.1 两个孤儿会话号的点没被计入该次出发',
+    Boolean(orphanEntry) && ptsBefore20 <= 1,
+    `#${start20.sessionNo} 修前 points=${ptsBefore20}（2 个孤儿点 no=999 未被计入）`);
+  const rep20 = await post('/api/track/repair-links', {});
+  ok('20.2 自愈接口执行成功且报告修正数',
+    rep20.ok === true && Number(rep20.fixed) >= 2,
+    JSON.stringify({ fixed: rep20.fixed, days: rep20.days, orphan: rep20.orphanBefore }).slice(0, 120));
+  // 断言"归属已对齐"：不再有孤儿点，且该天的点都归到了某次真实存在的出发上
+  const after20 = await J('/api/sessions');
+  const realNs = new Set((after20.starts || []).map((s) => Number(s.n)));
+  const rep20c = await post('/api/track/repair-links', {});
+  ok('20.3 自愈后不再有孤儿点（幂等，二次修正 0 个）',
+    rep20c.ok === true && Number(rep20c.fixed) === 0,
+    JSON.stringify({ fixed: rep20c.fixed }));
+  const tr20 = await J('/api/track/range?from=' + fixDay + '&to=' + fixDay);
+  const pts20 = ((tr20.days || [])[0] || {}).path || [];
+  ok('20.4 轨迹点本身一个没丢、坐标未变、且都归属到真实出发',
+    pts20.length === 2 && Math.abs(pts20[0].lat - 24.2001) < 1e-6
+      && pts20.every((p) => realNs.has(Number(p.no))),
+    'path=' + pts20.length + ' 归属=' + JSON.stringify(pts20.map((p) => p.no)));
+  const totalPts20 = (after20.starts || []).reduce((a, s) => a + (Number(s.points) || 0), 0);
+  ok('20.5 修复后出发点数总和覆盖了全部轨迹点',
+    totalPts20 >= pts20.length,
+    `出发点数总和=${totalPts20} 当日轨迹=${pts20.length}`);
+
   console.log('\n== 15. 每小时自动存档配置 ==');
   const cfg15 = await J('/api/config');
   ok('15.1 hourlyMailArchive 默认开启', cfg15.hourlyMailArchive !== false, 'value=' + cfg15.hourlyMailArchive);

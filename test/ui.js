@@ -113,6 +113,8 @@ let SESSIONS_STUB = { ok: true, starts: [], resume: null };   // /api/sessions �
 const SESSION_POSTS = [];  // 记录 session 相关 POST（回滚 / 单删 / 取消指定）
 const SESSION_STARTS = []; // 记录 /api/session/start 的请求体（重复起步防护测试用）
 let SESSION_START_STUB = {}; // 覆盖 /api/session/start 的返回（如 reused=true）
+const REPAIR_LINKS_POSTS = []; // 记录 /api/track/repair-links 的请求体（修复轨迹归属测试用）
+let REPAIR_LINKS_STUB = { ok: true, fixed: 0, days: 0, orphanBefore: 0 }; // 覆盖该接口返回
 let ARCHIVES_STUB = [];    // /api/mailbox/archives 候选存档桩
 const PULL_BODIES = [];    // 记录 /api/mailbox/pull 的请求体（校验选了哪一封）
 let D_FRESH = false;       // /api/session/use-origin 桩：记录"下次从设定出发点出发"状态
@@ -201,6 +203,10 @@ win.fetch = function (url, opt) {
   if (u.indexOf('/api/session/start') === 0) {
     try { SESSION_STARTS.push(JSON.parse(opt.body || '{}')); } catch (_) { SESSION_STARTS.push(null); }
     return json(Object.assign({ ok: true, sessionNo: SESSION_STARTS.length, cleared: [] }, SESSION_START_STUB));
+  }
+  if (u.indexOf('/api/track/repair-links') === 0) {
+    try { REPAIR_LINKS_POSTS.push(JSON.parse(opt.body || '{}')); } catch (_) { REPAIR_LINKS_POSTS.push(null); }
+    return json(REPAIR_LINKS_STUB);
   }
   if (u.indexOf('/api/session/') === 0) return json({ ok: true, date: TODAY, achievements: { newly: ['dist_5k'], unlocked: {}, total: 36, got: 5 } });
   if (u.indexOf('/api/report/') === 0) return json({ ok: true, url: '/reports/netwalk-' + TODAY + '.html' });
@@ -1545,6 +1551,36 @@ const shown = (id) => $(id).classList.contains('show');
     $('logList').textContent.slice(0, 160));
   SESSION_START_STUB = {};
   D9.state.started = false;
+
+  console.log('\n== AF. 修复轨迹归属按钮 ==');
+  // 「🔗 修复轨迹归属」：把轨迹点的会话号重新对准出发记录。
+  // 用于修「某次出发显示 0 点 / 地图上某段历史轨迹没画出来」，点本身不该被删或移动。
+  $('logList').innerHTML = '';
+  const oldConfirmAF = win.confirm;
+  win.confirm = () => true;
+  REPAIR_LINKS_POSTS.length = 0;
+  REPAIR_LINKS_STUB = { ok: true, fixed: 42, days: 3, orphanBefore: 42 };
+  if ($('btnLinkFix')) {
+    $('btnLinkFix').click();
+    await sleep(200);
+    ok('修复归属：点了按钮会调自愈接口', REPAIR_LINKS_POSTS.length === 1, 'calls=' + REPAIR_LINKS_POSTS.length);
+    ok('修复归属：日志写明修正了多少个点',
+      $('logList').textContent.indexOf('42') >= 0 && $('logList').textContent.indexOf('轨迹点') >= 0,
+      $('logList').textContent.slice(0, 200));
+  } else {
+    ok('修复归属：按钮存在', false, '缺少 #btnLinkFix');
+  }
+  // 无需修正时给出"本来就一致"的提示，而不是静默
+  $('logList').innerHTML = '';
+  REPAIR_LINKS_STUB = { ok: true, fixed: 0, days: 0, orphanBefore: 0 };
+  if ($('btnLinkFix')) {
+    $('btnLinkFix').click();
+    await sleep(200);
+    ok('修复归属：无需修正时给出明确提示',
+      $('logList').textContent.indexOf('本来就一致') >= 0,
+      $('logList').textContent.slice(0, 160));
+  }
+  win.confirm = oldConfirmAF;
 
   console.log('\n===== UI 测试结果：' + pass + ' 通过 / ' + fail + ' 失败 =====');
   if (errors.length) { console.log('\n捕获到的错误：'); errors.slice(0, 10).forEach((e) => console.log('  - ' + e)); }

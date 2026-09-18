@@ -322,9 +322,16 @@
           this.map.add(line);
           this._runs.push(line);
           this._curRun[li] = line;
-          // 笔迹太多会拖垮渲染：超过上限就把最老的段整段移除
-          if (this._runs.length > 2400) {
-            const dropped = this._runs.splice(0, 600);
+          // 笔迹太多会拖垮渲染：超过上限就把最老的段整段移除。
+          // ⚠ 历史轨迹重放（replaying=true）时不能用这个行走期上限：把好几天的历史
+          // 一次性重放会产生上千条笔迹，按 2400 淘汰会把**最早画的那批**（也就是
+          // 「第 N 次出发之前」的轨迹）成批删掉，地图上就只剩后面那一段 —— 这就是
+          // 「某次出发之前的轨迹全没了」的真实原因（数据其实完好）。
+          // 重放期用大得多的上限，只防内存爆掉，不删近期历史。
+          const cap = this._replaying ? 20000 : 2400;
+          if (this._runs.length > cap) {
+            const dropN = this._replaying ? 8000 : 600;
+            const dropped = this._runs.splice(0, dropN);
             for (const old of dropped) { try { this.map.remove(old); } catch (_) { /* noop */ } }
             // ⚠ 必须清掉指向已移除笔迹的引用：否则后续的点会追加进一条已经不在地图上的线里，
             // 表现为"长距离漫游到一定长度后轨迹突然断掉/消失"
@@ -353,10 +360,22 @@
         // 下一段从新 Polyline 开始，绝不从上一段的末点连一条直线过来（飞线根源）
         this._curRun = {};
       }
-      for (let i = 1; i < points.length; i++) {
-        this.addTrackPoint(points[i].lat, points[i].lng, points[i - 1], points[i].spd, points[i].road);
+      // 历史轨迹重放：一批 setTrack 调用之间保持 replaying 状态（由 beginReplay/endReplay 包裹），
+      // 这里只在**没有外层包裹**时自行标记，兼容老的单独调用方式。
+      const ownReplay = this._replaying !== true;
+      if (ownReplay) this._replaying = true;
+      try {
+        for (let i = 1; i < points.length; i++) {
+          this.addTrackPoint(points[i].lat, points[i].lng, points[i - 1], points[i].spd, points[i].road);
+        }
+      } finally {
+        if (ownReplay) this._replaying = false;
       }
     }
+
+    /** 开始/结束「历史轨迹重放」：重放期放宽笔迹上限，避免把早先画好的历史轨迹淘汰掉 */
+    beginReplay() { this._replaying = true; }
+    endReplay() { this._replaying = false; }
 
     /** 点亮一个街区块（约 150m 网格） */
     lightCell(lat, lng) {
